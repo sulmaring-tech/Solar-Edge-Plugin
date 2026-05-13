@@ -105,7 +105,7 @@ function normalizePowerFlowFromApi(siteFlow) {
 }
 
 function buildSyntheticPowerFlow(pvW, loadW, gridW, battW, socRaw, showBattery) {
-  const epsW = 8;
+  const epsW = 1;
   const pvKw = pvW / 1000;
   const loadKw = loadW / 1000;
   const gridKw = gridW / 1000;
@@ -191,8 +191,9 @@ function buildPowerFlowSvgMarkup(flow, uid) {
   const hbW = boxW / 2;
   const hbH = boxH / 2;
 
+  // Wie SolarEdge-TSX: Kante aktiv, wenn mindestens ein Endpunkt nennenswert Leistung hat.
   const connectionActive = (from, to) =>
-    Math.abs(nodeMap.get(from)?.powerKw ?? 0) > FLOW_ACTIVE_EPS_KW &&
+    Math.abs(nodeMap.get(from)?.powerKw ?? 0) > FLOW_ACTIVE_EPS_KW ||
     Math.abs(nodeMap.get(to)?.powerKw ?? 0) > FLOW_ACTIVE_EPS_KW;
 
   const renderOrder = ["PV", "LOAD", "GRID", "STORAGE"];
@@ -389,14 +390,19 @@ class SolarEdgePowerFlowCard extends HTMLElement {
     const period = 26;
     const speed = 0.016;
     const t0 = performance.now();
-    const loop = (now) => {
+    const loop = () => {
       if (!this.isConnected || !this.shadowRoot) return;
       const els = this.shadowRoot.querySelectorAll("line[data-se-dash]");
-      if (!els.length) return;
+      if (!els.length) {
+        this._dashRaf = requestAnimationFrame(loop);
+        return;
+      }
+      const now = performance.now();
       const base = -(((now - t0) * speed) % period);
       for (let i = 0; i < els.length; i++) {
         const el = els[i];
-        const dir = el.getAttribute("data-se-flow") === "from-hub" ? 1 : -1;
+        const fl = el.getAttribute("data-se-flow");
+        const dir = fl === "from-hub" ? 1 : -1;
         el.setAttribute("stroke-dashoffset", (dir * base).toFixed(2));
       }
       this._dashRaf = requestAnimationFrame(loop);
