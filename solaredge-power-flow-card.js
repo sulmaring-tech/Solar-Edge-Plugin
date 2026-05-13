@@ -1,4 +1,4 @@
-const SOLAREDGE_CARD_VERSION = "2026.05.13.10";
+const SOLAREDGE_CARD_VERSION = "2026.05.13.12";
 
 const FLOW_ACTIVE_EPS_KW = 0.0005;
 const FLOW_ARROW_SOLAR = "rgba(74,222,128,0.95)";
@@ -170,6 +170,37 @@ function escapeXml(s) {
     .replace(/"/g, "&quot;");
 }
 
+/**
+ * Farbe, Pfeil-Marker und Strich-Animationsrichtung pro SVG-Segment.
+ * leg 1 = Quelle -> Hub, leg 2 = Hub -> Ziel (physikalischer Leistungsfluss laut Verbindung).
+ *
+ * Regeln (vereinbart mit Nutzer):
+ * - Haus (LOAD): immer grün, Animation zum Haus (nur auf Segmenten, die auf LOAD zulaufen).
+ * - PV: grün Richtung Hub auf dem PV->Hub-Strang.
+ * - Netz: orange Richtung Hub beim Bezug (GRID->…); grün Richtung Netz bei Einspeisung (…->GRID).
+ * - Batterie: grün Richtung Batterie beim Laden (…->STORAGE); orange Richtung Hub beim Entladen (STORAGE->…).
+ */
+function connectionFlowLegStyle(c, leg, uid) {
+  const animFwd = "se-dash-anim-fwd";
+  const green = FLOW_ARROW_SOLAR;
+  const orange = FLOW_ARROW_GRID_IMPORT;
+  const markerGreen = `${uid}g`;
+  const markerOrange = `${uid}o`;
+
+  if (leg === 1) {
+    if (c.from === "PV") return { stroke: green, marker: markerGreen, anim: animFwd };
+    if (c.from === "GRID") return { stroke: orange, marker: markerOrange, anim: animFwd };
+    if (c.from === "STORAGE") return { stroke: orange, marker: markerOrange, anim: animFwd };
+    if (c.from === "LOAD") return { stroke: green, marker: markerGreen, anim: animFwd };
+    return { stroke: green, marker: markerGreen, anim: animFwd };
+  }
+  if (c.to === "LOAD") return { stroke: green, marker: markerGreen, anim: animFwd };
+  if (c.to === "GRID") return { stroke: green, marker: markerGreen, anim: animFwd };
+  if (c.to === "STORAGE") return { stroke: green, marker: markerGreen, anim: animFwd };
+  if (c.to === "PV") return { stroke: green, marker: markerGreen, anim: animFwd };
+  return { stroke: green, marker: markerGreen, anim: animFwd };
+}
+
 function buildPowerFlowSvgMarkup(flow, uid) {
   const arrowGreen = `${uid}g`;
   const arrowOrange = `${uid}o`;
@@ -232,50 +263,29 @@ function buildPowerFlowSvgMarkup(flow, uid) {
     if (!active) continue;
 
     const strokeW = 2.15;
-    const strokeIn = c.from === "GRID" ? FLOW_ARROW_GRID_IMPORT : FLOW_ARROW_SOLAR;
-    const markerIn = c.from === "GRID" ? arrowOrange : arrowGreen;
+    const leg1 = connectionFlowLegStyle(c, 1, uid);
+    const rawA1 = borderToward(pA.x, pA.y, hbW, hbH, hubCx, hubCy);
+    const rawA2 = borderToward(hubCx, hubCy, hwBox, hhBox, pA.x, pA.y);
+    const a = shortenSegment(rawA1.x, rawA1.y, rawA2.x, rawA2.y, GAP_NODE, GAP_HUB);
+    const aDash = retractStrokeEndBeforeArrowTip(a.x1, a.y1, a.x2, a.y2, STROKE_STOP_BEFORE_TIP_PX);
+    lines.push(
+      `<line class="se-dash-line ${leg1.anim}" x1="${aDash.x1}" y1="${aDash.y1}" x2="${aDash.x2}" y2="${aDash.y2}" stroke="${leg1.stroke}" stroke-width="${strokeW}" stroke-linecap="round" stroke-dasharray="10 16" />`
+    );
+    lines.push(
+      `<line x1="${aDash.x2}" y1="${aDash.y2}" x2="${a.x2}" y2="${a.y2}" stroke="transparent" stroke-width="1" marker-end="url(#${leg1.marker})" pointer-events="none" />`
+    );
 
-    if (c.from !== "LOAD") {
-      const rawA1 = borderToward(pA.x, pA.y, hbW, hbH, hubCx, hubCy);
-      const rawA2 = borderToward(hubCx, hubCy, hwBox, hhBox, pA.x, pA.y);
-      const a = shortenSegment(rawA1.x, rawA1.y, rawA2.x, rawA2.y, GAP_NODE, GAP_HUB);
-      const aDash = retractStrokeEndBeforeArrowTip(a.x1, a.y1, a.x2, a.y2, STROKE_STOP_BEFORE_TIP_PX);
-      lines.push(
-        `<line class="se-dash-line se-dash-to-hub" x1="${aDash.x1}" y1="${aDash.y1}" x2="${aDash.x2}" y2="${aDash.y2}" stroke="${strokeIn}" stroke-width="${strokeW}" stroke-linecap="round" stroke-dasharray="10 16" />`
-      );
-      lines.push(
-        `<line x1="${aDash.x2}" y1="${aDash.y2}" x2="${a.x2}" y2="${a.y2}" stroke="transparent" stroke-width="1" marker-end="url(#${markerIn})" pointer-events="none" />`
-      );
-    }
-
+    const leg2 = connectionFlowLegStyle(c, 2, uid);
     const rawB1 = borderToward(hubCx, hubCy, hwBox, hhBox, pB.x, pB.y);
     const rawB2 = borderToward(pB.x, pB.y, hbW, hbH, hubCx, hubCy);
     const b = shortenSegment(rawB1.x, rawB1.y, rawB2.x, rawB2.y, GAP_HUB, GAP_NODE);
     const bDash = retractStrokeEndBeforeArrowTip(b.x1, b.y1, b.x2, b.y2, STROKE_STOP_BEFORE_TIP_PX);
 
-    let strokeOut;
-    let markerOut;
-    if (c.to === "GRID") {
-      strokeOut = FLOW_ARROW_GRID_IMPORT;
-      markerOut = arrowOrange;
-    } else if (c.to === "LOAD") {
-      if (c.from === "GRID") {
-        strokeOut = FLOW_ARROW_GRID_IMPORT;
-        markerOut = arrowOrange;
-      } else {
-        strokeOut = FLOW_ARROW_SOLAR;
-        markerOut = arrowGreen;
-      }
-    } else {
-      strokeOut = FLOW_ARROW_SOLAR;
-      markerOut = arrowGreen;
-    }
-
     lines.push(
-      `<line class="se-dash-line se-dash-from-hub" x1="${bDash.x1}" y1="${bDash.y1}" x2="${bDash.x2}" y2="${bDash.y2}" stroke="${strokeOut}" stroke-width="${strokeW}" stroke-linecap="round" stroke-dasharray="10 16" />`
+      `<line class="se-dash-line ${leg2.anim}" x1="${bDash.x1}" y1="${bDash.y1}" x2="${bDash.x2}" y2="${bDash.y2}" stroke="${leg2.stroke}" stroke-width="${strokeW}" stroke-linecap="round" stroke-dasharray="10 16" />`
     );
     lines.push(
-      `<line x1="${bDash.x2}" y1="${bDash.y2}" x2="${b.x2}" y2="${b.y2}" stroke="transparent" stroke-width="1" marker-end="url(#${markerOut})" pointer-events="none" />`
+      `<line x1="${bDash.x2}" y1="${bDash.y2}" x2="${b.x2}" y2="${b.y2}" stroke="transparent" stroke-width="1" marker-end="url(#${leg2.marker})" pointer-events="none" />`
     );
   }
 
@@ -775,10 +785,11 @@ class SolarEdgePowerFlowCard extends HTMLElement {
         stroke-dasharray: 10 16;
         stroke-dashoffset: 0;
       }
-      .se-flow-svg line.se-dash-to-hub {
+      /* Strichbewegung in Flussrichtung (Linie Quelle->Ziel); fwd = entlang x1->x2. */
+      .se-flow-svg line.se-dash-anim-fwd {
         animation: seFlowDashScroll 1.35s linear infinite;
       }
-      .se-flow-svg line.se-dash-from-hub {
+      .se-flow-svg line.se-dash-anim-rev {
         animation: seFlowDashScroll 1.35s linear infinite reverse;
       }
       @media (prefers-reduced-motion: reduce) {
