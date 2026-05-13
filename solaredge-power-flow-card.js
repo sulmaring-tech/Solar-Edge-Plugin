@@ -1,4 +1,4 @@
-const SOLAREDGE_CARD_VERSION = "2026.05.13.7";
+const SOLAREDGE_CARD_VERSION = "2026.05.13.8";
 
 const FLOW_ACTIVE_EPS_KW = 0.008;
 const FLOW_ARROW_SOLAR = "rgba(74,222,128,0.95)";
@@ -192,7 +192,7 @@ function buildPowerFlowSvgMarkup(flow, uid) {
   const hbH = boxH / 2;
 
   const connectionActive = (from, to) =>
-    Math.abs(nodeMap.get(from)?.powerKw ?? 0) > FLOW_ACTIVE_EPS_KW ||
+    Math.abs(nodeMap.get(from)?.powerKw ?? 0) > FLOW_ACTIVE_EPS_KW &&
     Math.abs(nodeMap.get(to)?.powerKw ?? 0) > FLOW_ACTIVE_EPS_KW;
 
   const renderOrder = ["PV", "LOAD", "GRID", "STORAGE"];
@@ -203,9 +203,9 @@ function buildPowerFlowSvgMarkup(flow, uid) {
     const raw1 = borderToward(p.x, p.y, hbW, hbH, hubCx, hubCy);
     const raw2 = borderToward(hubCx, hubCy, hwBox, hhBox, p.x, p.y);
     const s = shortenSegment(raw1.x, raw1.y, raw2.x, raw2.y, GAP_NODE, GAP_HUB);
-    // Graue Speichen: kein zweites Kuerzen wie bei Pfeil-Linien — sonst werden die Striche nur noch wenige px lang.
+    // Statische Hilfslinien — keine Animation (wirkt sonst hektisch und unabhaengig vom echten Fluss).
     spokes.push(
-      `<line data-se-dash="1" x1="${s.x1}" y1="${s.y1}" x2="${s.x2}" y2="${s.y2}" stroke="rgba(148,163,184,0.35)" stroke-width="1.35" stroke-linecap="round" stroke-dasharray="5 12" stroke-dashoffset="0" />`
+      `<line x1="${s.x1}" y1="${s.y1}" x2="${s.x2}" y2="${s.y2}" stroke="rgba(148,163,184,0.28)" stroke-width="1.25" stroke-linecap="round" />`
     );
   }
 
@@ -232,7 +232,7 @@ function buildPowerFlowSvgMarkup(flow, uid) {
       const a = shortenSegment(rawA1.x, rawA1.y, rawA2.x, rawA2.y, GAP_NODE, GAP_HUB);
       const aDash = retractStrokeEndBeforeArrowTip(a.x1, a.y1, a.x2, a.y2, STROKE_STOP_BEFORE_TIP_PX);
       lines.push(
-        `<line data-se-dash="1" x1="${aDash.x1}" y1="${aDash.y1}" x2="${aDash.x2}" y2="${aDash.y2}" stroke="${strokeIn}" stroke-width="${strokeW}" stroke-linecap="round" stroke-dasharray="9 15" stroke-dashoffset="0" />`
+        `<line data-se-dash="1" data-se-flow="to-hub" x1="${aDash.x1}" y1="${aDash.y1}" x2="${aDash.x2}" y2="${aDash.y2}" stroke="${strokeIn}" stroke-width="${strokeW}" stroke-linecap="round" stroke-dasharray="10 16" stroke-dashoffset="0" />`
       );
       lines.push(
         `<line x1="${aDash.x2}" y1="${aDash.y2}" x2="${a.x2}" y2="${a.y2}" stroke="transparent" stroke-width="1" marker-end="url(#${markerIn})" pointer-events="none" />`
@@ -263,7 +263,7 @@ function buildPowerFlowSvgMarkup(flow, uid) {
     }
 
     lines.push(
-      `<line data-se-dash="1" x1="${bDash.x1}" y1="${bDash.y1}" x2="${bDash.x2}" y2="${bDash.y2}" stroke="${strokeOut}" stroke-width="${strokeW}" stroke-linecap="round" stroke-dasharray="9 15" stroke-dashoffset="0" />`
+      `<line data-se-dash="1" data-se-flow="from-hub" x1="${bDash.x1}" y1="${bDash.y1}" x2="${bDash.x2}" y2="${bDash.y2}" stroke="${strokeOut}" stroke-width="${strokeW}" stroke-linecap="round" stroke-dasharray="10 16" stroke-dashoffset="0" />`
     );
     lines.push(
       `<line x1="${bDash.x2}" y1="${bDash.y2}" x2="${b.x2}" y2="${b.y2}" stroke="transparent" stroke-width="1" marker-end="url(#${markerOut})" pointer-events="none" />`
@@ -383,20 +383,21 @@ class SolarEdgePowerFlowCard extends HTMLElement {
     }
   }
 
-  /** Strich-Animation per rAF: funktioniert in HA/Lit/Shadow DOM, SMIL/CSS oft nicht. */
+  /** Strich-Animation nur auf farbigen Flusslinien; Richtung to-hub / from-hub. */
   _startDashAnimation() {
     this._stopDashAnimation();
-    const period = 24;
-    const speed = 0.045;
-    let t0 = performance.now();
+    const period = 26;
+    const speed = 0.016;
+    const t0 = performance.now();
     const loop = (now) => {
       if (!this.isConnected || !this.shadowRoot) return;
-      const lines = this.shadowRoot.querySelectorAll("line[data-se-dash]");
-      if (!lines.length) return;
-      const off = -(((now - t0) * speed) % period);
-      const s = off.toFixed(2);
-      for (let i = 0; i < lines.length; i++) {
-        lines[i].setAttribute("stroke-dashoffset", s);
+      const els = this.shadowRoot.querySelectorAll("line[data-se-dash]");
+      if (!els.length) return;
+      const base = -(((now - t0) * speed) % period);
+      for (let i = 0; i < els.length; i++) {
+        const el = els[i];
+        const dir = el.getAttribute("data-se-flow") === "from-hub" ? 1 : -1;
+        el.setAttribute("stroke-dashoffset", (dir * base).toFixed(2));
       }
       this._dashRaf = requestAnimationFrame(loop);
     };
