@@ -1,4 +1,4 @@
-const SOLAREDGE_CARD_VERSION = "2026.05.13.4";
+const SOLAREDGE_CARD_VERSION = "2026.05.13.5";
 
 const FLOW_ACTIVE_EPS_KW = 0.008;
 const FLOW_ARROW_SOLAR = "rgba(74,222,128,0.95)";
@@ -205,7 +205,7 @@ function buildPowerFlowSvgMarkup(flow, uid) {
     const s = shortenSegment(raw1.x, raw1.y, raw2.x, raw2.y, GAP_NODE, GAP_HUB);
     const sDraw = shortenSegment(s.x1, s.y1, s.x2, s.y2, STROKE_STOP_BEFORE_TIP_PX, STROKE_STOP_BEFORE_TIP_PX);
     spokes.push(
-      `<line x1="${sDraw.x1}" y1="${sDraw.y1}" x2="${sDraw.x2}" y2="${sDraw.y2}" stroke="rgba(148,163,184,0.28)" stroke-width="1.25" stroke-linecap="round" />`
+      `<line x1="${sDraw.x1}" y1="${sDraw.y1}" x2="${sDraw.x2}" y2="${sDraw.y2}" stroke="rgba(148,163,184,0.28)" stroke-width="1.25" stroke-linecap="round" stroke-dasharray="4 10" stroke-dashoffset="0"><animate attributeName="stroke-dashoffset" from="0" to="-14" dur="2.4s" repeatCount="indefinite" /></line>`
     );
   }
 
@@ -232,7 +232,7 @@ function buildPowerFlowSvgMarkup(flow, uid) {
       const a = shortenSegment(rawA1.x, rawA1.y, rawA2.x, rawA2.y, GAP_NODE, GAP_HUB);
       const aDash = retractStrokeEndBeforeArrowTip(a.x1, a.y1, a.x2, a.y2, STROKE_STOP_BEFORE_TIP_PX);
       lines.push(
-        `<line x1="${aDash.x1}" y1="${aDash.y1}" x2="${aDash.x2}" y2="${aDash.y2}" class="se-flow-line se-flow-animate" stroke="${strokeIn}" stroke-width="${strokeW}" stroke-linecap="round" />`
+        `<line x1="${aDash.x1}" y1="${aDash.y1}" x2="${aDash.x2}" y2="${aDash.y2}" stroke="${strokeIn}" stroke-width="${strokeW}" stroke-linecap="round" stroke-dasharray="8 14" stroke-dashoffset="0"><animate attributeName="stroke-dashoffset" from="0" to="-22" dur="1.1s" repeatCount="indefinite" /></line>`
       );
       lines.push(
         `<line x1="${aDash.x2}" y1="${aDash.y2}" x2="${a.x2}" y2="${a.y2}" stroke="transparent" stroke-width="1" marker-end="url(#${markerIn})" pointer-events="none" />`
@@ -263,7 +263,7 @@ function buildPowerFlowSvgMarkup(flow, uid) {
     }
 
     lines.push(
-      `<line x1="${bDash.x1}" y1="${bDash.y1}" x2="${bDash.x2}" y2="${bDash.y2}" class="se-flow-line se-flow-animate" stroke="${strokeOut}" stroke-width="${strokeW}" stroke-linecap="round" />`
+      `<line x1="${bDash.x1}" y1="${bDash.y1}" x2="${bDash.x2}" y2="${bDash.y2}" stroke="${strokeOut}" stroke-width="${strokeW}" stroke-linecap="round" stroke-dasharray="8 14" stroke-dashoffset="0"><animate attributeName="stroke-dashoffset" from="0" to="-22" dur="1.1s" repeatCount="indefinite" /></line>`
     );
     lines.push(
       `<line x1="${bDash.x2}" y1="${bDash.y2}" x2="${b.x2}" y2="${b.y2}" stroke="transparent" stroke-width="1" marker-end="url(#${markerOut})" pointer-events="none" />`
@@ -635,14 +635,6 @@ class SolarEdgePowerFlowCard extends HTMLElement {
 
     const styles = `
       :host { display:block; }
-      @keyframes se-flow-dash {
-        from { stroke-dashoffset: 0; }
-        to { stroke-dashoffset: -36; }
-      }
-      .se-flow-animate {
-        stroke-dasharray: 7 11;
-        animation: se-flow-dash 1.05s linear infinite;
-      }
       ha-card {
         padding: 14px;
         border-radius: 18px;
