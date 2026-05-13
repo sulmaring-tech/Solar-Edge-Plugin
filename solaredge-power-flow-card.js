@@ -1,4 +1,4 @@
-const SOLAREDGE_CARD_VERSION = "2026.05.13.5";
+const SOLAREDGE_CARD_VERSION = "2026.05.13.7";
 
 const FLOW_ACTIVE_EPS_KW = 0.008;
 const FLOW_ARROW_SOLAR = "rgba(74,222,128,0.95)";
@@ -203,9 +203,9 @@ function buildPowerFlowSvgMarkup(flow, uid) {
     const raw1 = borderToward(p.x, p.y, hbW, hbH, hubCx, hubCy);
     const raw2 = borderToward(hubCx, hubCy, hwBox, hhBox, p.x, p.y);
     const s = shortenSegment(raw1.x, raw1.y, raw2.x, raw2.y, GAP_NODE, GAP_HUB);
-    const sDraw = shortenSegment(s.x1, s.y1, s.x2, s.y2, STROKE_STOP_BEFORE_TIP_PX, STROKE_STOP_BEFORE_TIP_PX);
+    // Graue Speichen: kein zweites Kuerzen wie bei Pfeil-Linien — sonst werden die Striche nur noch wenige px lang.
     spokes.push(
-      `<line x1="${sDraw.x1}" y1="${sDraw.y1}" x2="${sDraw.x2}" y2="${sDraw.y2}" stroke="rgba(148,163,184,0.28)" stroke-width="1.25" stroke-linecap="round" stroke-dasharray="4 10" stroke-dashoffset="0"><animate attributeName="stroke-dashoffset" from="0" to="-14" dur="2.4s" repeatCount="indefinite" /></line>`
+      `<line data-se-dash="1" x1="${s.x1}" y1="${s.y1}" x2="${s.x2}" y2="${s.y2}" stroke="rgba(148,163,184,0.35)" stroke-width="1.35" stroke-linecap="round" stroke-dasharray="5 12" stroke-dashoffset="0" />`
     );
   }
 
@@ -232,7 +232,7 @@ function buildPowerFlowSvgMarkup(flow, uid) {
       const a = shortenSegment(rawA1.x, rawA1.y, rawA2.x, rawA2.y, GAP_NODE, GAP_HUB);
       const aDash = retractStrokeEndBeforeArrowTip(a.x1, a.y1, a.x2, a.y2, STROKE_STOP_BEFORE_TIP_PX);
       lines.push(
-        `<line x1="${aDash.x1}" y1="${aDash.y1}" x2="${aDash.x2}" y2="${aDash.y2}" stroke="${strokeIn}" stroke-width="${strokeW}" stroke-linecap="round" stroke-dasharray="8 14" stroke-dashoffset="0"><animate attributeName="stroke-dashoffset" from="0" to="-22" dur="1.1s" repeatCount="indefinite" /></line>`
+        `<line data-se-dash="1" x1="${aDash.x1}" y1="${aDash.y1}" x2="${aDash.x2}" y2="${aDash.y2}" stroke="${strokeIn}" stroke-width="${strokeW}" stroke-linecap="round" stroke-dasharray="9 15" stroke-dashoffset="0" />`
       );
       lines.push(
         `<line x1="${aDash.x2}" y1="${aDash.y2}" x2="${a.x2}" y2="${a.y2}" stroke="transparent" stroke-width="1" marker-end="url(#${markerIn})" pointer-events="none" />`
@@ -263,7 +263,7 @@ function buildPowerFlowSvgMarkup(flow, uid) {
     }
 
     lines.push(
-      `<line x1="${bDash.x1}" y1="${bDash.y1}" x2="${bDash.x2}" y2="${bDash.y2}" stroke="${strokeOut}" stroke-width="${strokeW}" stroke-linecap="round" stroke-dasharray="8 14" stroke-dashoffset="0"><animate attributeName="stroke-dashoffset" from="0" to="-22" dur="1.1s" repeatCount="indefinite" /></line>`
+      `<line data-se-dash="1" x1="${bDash.x1}" y1="${bDash.y1}" x2="${bDash.x2}" y2="${bDash.y2}" stroke="${strokeOut}" stroke-width="${strokeW}" stroke-linecap="round" stroke-dasharray="9 15" stroke-dashoffset="0" />`
     );
     lines.push(
       `<line x1="${bDash.x2}" y1="${bDash.y2}" x2="${b.x2}" y2="${b.y2}" stroke="transparent" stroke-width="1" marker-end="url(#${markerOut})" pointer-events="none" />`
@@ -315,13 +315,11 @@ function buildPowerFlowSvgMarkup(flow, uid) {
 
     const socText =
       socPct != null
-        ? `<text x="32" y="22" text-anchor="middle" dominant-baseline="central" fill="#ecfdf5" stroke="rgba(0,0,0,0.42)" stroke-width="0.35" paint-order="stroke fill" font-size="${socPct >= 100 ? 4.35 : 5.1}" font-weight="700">${Math.round(socPct)}%</text>`
+        ? `<text x="32" y="27" text-anchor="middle" dominant-baseline="central" fill="#ecfdf5" stroke="rgba(0,0,0,0.42)" stroke-width="0.35" paint-order="stroke fill" font-size="${socPct >= 100 ? 6 : 7}" font-weight="700">${Math.round(socPct)}%</text>`
         : "";
 
-    const iconLine =
-      n.key === "STORAGE" && socPct != null
-        ? ""
-        : `<text x="32" y="22" text-anchor="middle" class="se-node-icon">${iconChar}</text>`;
+    const iconY = n.key === "STORAGE" && socPct != null ? 16 : 22;
+    const iconLine = `<text x="32" y="${iconY}" text-anchor="middle" class="se-node-icon">${iconChar}</text>`;
 
     nodeGroups.push(`
       <g transform="translate(${x},${y})">
@@ -378,6 +376,33 @@ class SolarEdgePowerFlowCard extends HTMLElement {
     }
   }
 
+  _stopDashAnimation() {
+    if (this._dashRaf != null) {
+      cancelAnimationFrame(this._dashRaf);
+      this._dashRaf = null;
+    }
+  }
+
+  /** Strich-Animation per rAF: funktioniert in HA/Lit/Shadow DOM, SMIL/CSS oft nicht. */
+  _startDashAnimation() {
+    this._stopDashAnimation();
+    const period = 24;
+    const speed = 0.045;
+    let t0 = performance.now();
+    const loop = (now) => {
+      if (!this.isConnected || !this.shadowRoot) return;
+      const lines = this.shadowRoot.querySelectorAll("line[data-se-dash]");
+      if (!lines.length) return;
+      const off = -(((now - t0) * speed) % period);
+      const s = off.toFixed(2);
+      for (let i = 0; i < lines.length; i++) {
+        lines[i].setAttribute("stroke-dashoffset", s);
+      }
+      this._dashRaf = requestAnimationFrame(loop);
+    };
+    this._dashRaf = requestAnimationFrame(loop);
+  }
+
   disconnectedCallback() {
     if (this._tickInterval) {
       clearInterval(this._tickInterval);
@@ -391,6 +416,7 @@ class SolarEdgePowerFlowCard extends HTMLElement {
       clearInterval(this._directApiInterval);
       this._directApiInterval = null;
     }
+    this._stopDashAnimation();
   }
 
   static getConfigElement() {
@@ -585,6 +611,7 @@ class SolarEdgePowerFlowCard extends HTMLElement {
     if (!this._hass || !this._config) return;
 
     if (!this.shadowRoot) this.attachShadow({ mode: "open" });
+    this._stopDashAnimation();
 
     const e = this._config.entities;
     const useDirectApi = Boolean(this._config.use_direct_api);
@@ -743,6 +770,7 @@ class SolarEdgePowerFlowCard extends HTMLElement {
         </div>
       </ha-card>
     `;
+    this._startDashAnimation();
   }
 }
 
