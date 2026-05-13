@@ -281,9 +281,60 @@ class SolarEdgePowerFlowCardEditor extends HTMLElement {
       .sort();
   }
 
+  _isSolarEdgeEntity(entityId) {
+    const st = this._hass?.states?.[entityId];
+    if (!st) return false;
+    const text = [
+      entityId,
+      st.attributes?.friendly_name || "",
+      st.attributes?.manufacturer || "",
+      st.attributes?.device_class || "",
+      st.attributes?.source || "",
+      st.attributes?.attribution || "",
+      st.attributes?.integration || "",
+    ].join(" ").toLowerCase();
+    return text.includes("solaredge") || text.includes("solar edge");
+  }
+
+  _rankEntity(entityId, keywords) {
+    const st = this._hass?.states?.[entityId];
+    const haystack = [
+      entityId,
+      st?.attributes?.friendly_name || "",
+      st?.attributes?.device_class || "",
+      st?.attributes?.unit_of_measurement || "",
+    ].join(" ").toLowerCase();
+    let score = 0;
+    for (const keyword of keywords) {
+      if (haystack.includes(keyword)) score += 1;
+    }
+    if (this._isSolarEdgeEntity(entityId)) score += 3;
+    return score;
+  }
+
+  _optionsForPath(path) {
+    const all = this._entityOptions();
+    const solaredgeOnly = all.filter((id) => this._isSolarEdgeEntity(id));
+    const pool = solaredgeOnly.length ? solaredgeOnly : all;
+
+    const keywordMap = {
+      "entities.pv_power": ["pv", "solar", "production", "power", "ac"],
+      "entities.house_power": ["load", "consumption", "house", "home", "power"],
+      "entities.grid_power": ["grid", "import", "export", "meter", "power"],
+      "entities.battery_power": ["battery", "charge", "discharge", "power"],
+      "entities.battery_soc": ["battery", "soc", "state of charge", "%", "capacity"],
+    };
+    const keywords = keywordMap[path] || [];
+
+    return pool
+      .map((id) => ({ id, score: this._rankEntity(id, keywords) }))
+      .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id))
+      .map((item) => item.id);
+  }
+
   _selectRow(label, path) {
     const val = this._value(path, "");
-    const options = this._entityOptions();
+    const options = this._optionsForPath(path);
     return `
       <label>
         <span>${label}</span>
@@ -311,6 +362,9 @@ class SolarEdgePowerFlowCardEditor extends HTMLElement {
           <span>Titel</span>
           <input data-path="title" value="${this._value("title", "SolarEdge Energiefluss")}" />
         </label>
+        <span style="font-size:0.8rem; opacity:0.75;">
+          Dropdowns zeigen bevorzugt passende SolarEdge-Entitaeten.
+        </span>
         ${this._selectRow("PV Leistung", "entities.pv_power")}
         ${this._selectRow("Hausverbrauch", "entities.house_power")}
         ${this._selectRow("Netzleistung (+Bezug / -Einspeisung)", "entities.grid_power")}
