@@ -1,0 +1,6 @@
+{
+  "name": "SolarEdge Power Flow Card",
+  "content_in_root": true,
+  "filename": "solaredge-power-flow-card.js",
+  "render_readme": true
+}
