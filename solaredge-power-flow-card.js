@@ -1,6 +1,6 @@
-const SOLAREDGE_CARD_VERSION = "2026.05.13.8";
+const SOLAREDGE_CARD_VERSION = "2026.05.13.9";
 
-const FLOW_ACTIVE_EPS_KW = 0.008;
+const FLOW_ACTIVE_EPS_KW = 0.0005;
 const FLOW_ARROW_SOLAR = "rgba(74,222,128,0.95)";
 const FLOW_ARROW_GRID_IMPORT = "rgba(251,146,60,0.95)";
 const FLOW_MARKER_SOLAR_FILL = "rgba(74,222,128,0.98)";
@@ -67,11 +67,19 @@ function normalizePowerFlowFromApi(siteFlow) {
     const n = Number(v);
     if (!Number.isFinite(n)) return 0;
     if (unit === "kw") return n;
-    if (Math.abs(n) < 50) return n;
     return n / 1000;
   };
 
-  const keyMap = { PRODUCTION: "PV", CONSUMPTION: "LOAD", FEEDIN: "GRID", PURCHASE: "GRID", STORAGE: "STORAGE" };
+  const keyMap = {
+    PRODUCTION: "PV",
+    PV: "PV",
+    CONSUMPTION: "LOAD",
+    LOAD: "LOAD",
+    FEEDIN: "GRID",
+    PURCHASE: "GRID",
+    GRID: "GRID",
+    STORAGE: "STORAGE",
+  };
   const nodes = [];
   const nodeKeys = ["PV", "LOAD", "GRID", "STORAGE"];
   for (const key of nodeKeys) {
@@ -95,8 +103,8 @@ function normalizePowerFlowFromApi(siteFlow) {
   let connections = Array.isArray(siteFlow.connections) ? siteFlow.connections : [];
   connections = connections
     .map((c) => ({
-      from: keyMap[c.from] || c.from,
-      to: keyMap[c.to] || c.to,
+      from: keyMap[String(c.from ?? "").toUpperCase()] || c.from,
+      to: keyMap[String(c.to ?? "").toUpperCase()] || c.to,
     }))
     .filter((c) => nodeKeys.includes(c.from) && nodeKeys.includes(c.to));
 
@@ -514,7 +522,6 @@ class SolarEdgePowerFlowCard extends HTMLElement {
     if (!Number.isFinite(n)) return 0;
     const u = String(unitMaybe || "").toLowerCase();
     if (u === "kw") return n * 1000;
-    if (Math.abs(n) < 50) return n * 1000;
     return n;
   }
 
@@ -554,9 +561,15 @@ class SolarEdgePowerFlowCard extends HTMLElement {
       lastFetch: new Date(),
     };
     const normalized = normalizePowerFlowFromApi(flow);
-    this._directPowerFlow =
-      normalized ||
-      buildSyntheticPowerFlow(pvW, loadW, gridW, batteryW, batterySoc, Boolean(this._config?.show_battery));
+    const showBatt = Boolean(this._config?.show_battery);
+    const synthetic = buildSyntheticPowerFlow(pvW, loadW, gridW, batteryW, batterySoc, showBatt);
+    if (!normalized) {
+      this._directPowerFlow = synthetic;
+    } else if (!normalized.connections?.length) {
+      this._directPowerFlow = { ...normalized, connections: synthetic.connections };
+    } else {
+      this._directPowerFlow = normalized;
+    }
     this._directApiError = "";
   }
 
