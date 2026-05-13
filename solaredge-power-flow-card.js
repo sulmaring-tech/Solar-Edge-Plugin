@@ -6,6 +6,7 @@ class SolarEdgePowerFlowCard extends HTMLElement {
     // Repaint periodically so the "Live" timestamp updates even if no new state arrives.
     this._tickInterval = setInterval(() => this._render(), 1000);
     this._setupRefreshInterval();
+    this._setupDirectApiPolling();
   }
 
   disconnectedCallback() {
@@ -17,6 +18,10 @@ class SolarEdgePowerFlowCard extends HTMLElement {
       clearInterval(this._refreshInterval);
       this._refreshInterval = null;
     }
+    if (this._directApiInterval) {
+      clearInterval(this._directApiInterval);
+      this._directApiInterval = null;
+    }
   }
 
   static getConfigElement() {
@@ -27,6 +32,10 @@ class SolarEdgePowerFlowCard extends HTMLElement {
     return {
       type: "custom:solaredge-power-flow-card",
       title: "SolarEdge Energiefluss",
+      use_direct_api: false,
+      site_id: "",
+      api_key: "",
+      api_poll_seconds: 30,
       entities: {
         pv_power: "",
         house_power: "",
@@ -41,7 +50,10 @@ class SolarEdgePowerFlowCard extends HTMLElement {
   }
 
   setConfig(config) {
-    if (!config.entities || !config.entities.pv_power || !config.entities.house_power || !config.entities.grid_power) {
+    if (
+      !config.use_direct_api &&
+      (!config.entities || !config.entities.pv_power || !config.entities.house_power || !config.entities.grid_power)
+    ) {
       throw new Error("Bitte mindestens pv_power, house_power und grid_power in entities konfigurieren.");
     }
 
@@ -50,6 +62,10 @@ class SolarEdgePowerFlowCard extends HTMLElement {
       show_battery: true,
       watt_threshold_kw: 10,
       force_refresh_seconds: 0,
+      use_direct_api: false,
+      site_id: "",
+      api_key: "",
+      api_poll_seconds: 30,
       ...config,
       entities: {
         battery_power: "",
@@ -57,11 +73,13 @@ class SolarEdgePowerFlowCard extends HTMLElement {
         ...(config.entities || {}),
       },
     };
+    this._setupDirectApiPolling();
   }
 
   set hass(hass) {
     this._hass = hass;
     this._setupRefreshInterval();
+    this._setupDirectApiPolling();
     this._render();
   }
 
@@ -70,6 +88,7 @@ class SolarEdgePowerFlowCard extends HTMLElement {
   }
 
   _setupRefreshInterval() {
+    if (this._config?.use_direct_api) return;
     if (this._refreshInterval) {
       clearInterval(this._refreshInterval);
       this._refreshInterval = null;
@@ -84,6 +103,78 @@ class SolarEdgePowerFlowCard extends HTMLElement {
     this._refreshInterval = setInterval(() => {
       this._hass.callService("homeassistant", "update_entity", { entity_id: ids });
     }, Math.max(5, secs) * 1000);
+  }
+
+  _kwMaybeToW(value, unitMaybe) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 0;
+    const u = String(unitMaybe || "").toLowerCase();
+    if (u === "kw") return n * 1000;
+    if (Math.abs(n) < 50) return n * 1000;
+    return n;
+  }
+
+  async _fetchDirectApiData() {
+    const siteId = String(this._config?.site_id || "").trim();
+    const apiKey = String(this._config?.api_key || "").trim();
+    if (!siteId || !apiKey) return;
+
+    const base = `https://monitoringapi.solaredge.com/site/${encodeURIComponent(siteId)}`;
+    const overviewUrl = `${base}/overview?api_key=${encodeURIComponent(apiKey)}`;
+    const flowUrl = `${base}/currentPowerFlow?api_key=${encodeURIComponent(apiKey)}`;
+
+    const [overviewResp, flowResp] = await Promise.all([fetch(overviewUrl), fetch(flowUrl)]);
+    if (!overviewResp.ok || !flowResp.ok) {
+      throw new Error(`SolarEdge API Fehler (${overviewResp.status}/${flowResp.status})`);
+    }
+
+    const overviewJson = await overviewResp.json();
+    const flowJson = await flowResp.json();
+    const ov = overviewJson?.overview || {};
+    const flow = flowJson?.siteCurrentPowerFlow || flowJson || {};
+
+    const pvW =
+      this._kwMaybeToW(flow?.PV?.currentPower, flow?.unit) ||
+      this._kwMaybeToW(ov?.currentPower?.power, ov?.currentPower?.unit);
+    const loadW = this._kwMaybeToW(flow?.LOAD?.currentPower, flow?.unit);
+    const gridW = this._kwMaybeToW(flow?.GRID?.currentPower, flow?.unit);
+    const batteryW = this._kwMaybeToW(flow?.STORAGE?.currentPower, flow?.unit);
+    const batterySoc = Number(flow?.STORAGE?.chargeLevel || flow?.STORAGE?.chargeLevelPercent);
+
+    this._directData = {
+      pvW: Number.isFinite(pvW) ? pvW : 0,
+      loadW: Number.isFinite(loadW) ? loadW : 0,
+      gridW: Number.isFinite(gridW) ? gridW : 0,
+      batteryW: Number.isFinite(batteryW) ? batteryW : 0,
+      batterySoc: Number.isFinite(batterySoc) ? batterySoc : NaN,
+      lastFetch: new Date(),
+    };
+    this._directApiError = "";
+  }
+
+  _setupDirectApiPolling() {
+    if (this._directApiInterval) {
+      clearInterval(this._directApiInterval);
+      this._directApiInterval = null;
+    }
+
+    if (!this._config?.use_direct_api) return;
+    const siteId = String(this._config?.site_id || "").trim();
+    const apiKey = String(this._config?.api_key || "").trim();
+    if (!siteId || !apiKey) return;
+
+    const secs = Math.max(10, Number(this._config?.api_poll_seconds || 30));
+    const doFetch = async () => {
+      try {
+        await this._fetchDirectApiData();
+      } catch (err) {
+        this._directApiError = err?.message || "SolarEdge API Abruf fehlgeschlagen";
+      } finally {
+        this._render();
+      }
+    };
+    doFetch();
+    this._directApiInterval = setInterval(doFetch, secs * 1000);
   }
 
   _stateValue(entityId, fallback = 0) {
@@ -146,18 +237,33 @@ class SolarEdgePowerFlowCard extends HTMLElement {
     if (!this.shadowRoot) this.attachShadow({ mode: "open" });
 
     const e = this._config.entities;
-    const showBattery = Boolean(this._config.show_battery && e.battery_power);
+    const useDirectApi = Boolean(this._config.use_direct_api);
+    const showBattery = Boolean(this._config.show_battery && (useDirectApi || e.battery_power));
 
-    const pvRaw = this._stateValue(e.pv_power);
-    const loadRaw = this._stateValue(e.house_power);
-    const gridRaw = this._stateValue(e.grid_power);
-    const battRaw = showBattery ? this._stateValue(e.battery_power) : 0;
-    const socRaw = e.battery_soc ? this._stateValue(e.battery_soc, NaN) : NaN;
+    let pvW;
+    let loadW;
+    let gridW;
+    let battW;
+    let socRaw;
 
-    const pvW = this._toW(pvRaw, this._entityUnit(e.pv_power));
-    const loadW = this._toW(loadRaw, this._entityUnit(e.house_power));
-    const gridW = this._toW(gridRaw, this._entityUnit(e.grid_power));
-    const battW = showBattery ? this._toW(battRaw, this._entityUnit(e.battery_power)) : 0;
+    if (useDirectApi && this._directData) {
+      pvW = this._directData.pvW;
+      loadW = this._directData.loadW;
+      gridW = this._directData.gridW;
+      battW = showBattery ? this._directData.batteryW : 0;
+      socRaw = this._directData.batterySoc;
+    } else {
+      const pvRaw = this._stateValue(e.pv_power);
+      const loadRaw = this._stateValue(e.house_power);
+      const gridRaw = this._stateValue(e.grid_power);
+      const battRaw = showBattery ? this._stateValue(e.battery_power) : 0;
+      socRaw = e.battery_soc ? this._stateValue(e.battery_soc, NaN) : NaN;
+
+      pvW = this._toW(pvRaw, this._entityUnit(e.pv_power));
+      loadW = this._toW(loadRaw, this._entityUnit(e.house_power));
+      gridW = this._toW(gridRaw, this._entityUnit(e.grid_power));
+      battW = showBattery ? this._toW(battRaw, this._entityUnit(e.battery_power)) : 0;
+    }
 
     const p2home = Math.max(0, Math.min(pvW, loadW));
     const pvExtra = Math.max(0, pvW - p2home);
@@ -381,6 +487,19 @@ class SolarEdgePowerFlowCard extends HTMLElement {
             <div class="chip-value">${netW >= 0 ? "Bezug" : "Einspeisung"}</div>
           </div>
         </div>
+        ${useDirectApi ? `
+        <div class="stats">
+          <div class="chip">
+            <div class="chip-label">Datenquelle</div>
+            <div class="chip-value">SolarEdge API direkt</div>
+          </div>
+          <div class="chip">
+            <div class="chip-label">Letzter API Abruf</div>
+            <div class="chip-value">${this._directData?.lastFetch ? this._directData.lastFetch.toLocaleTimeString("de-DE") : "-"}</div>
+          </div>
+        </div>
+        ${this._directApiError ? `<div class="chip" style="margin-top:8px;"><div class="chip-label">API Fehler</div><div class="chip-value">${this._directApiError}</div></div>` : ""}
+        ` : ""}
       </ha-card>
     `;
   }
@@ -522,6 +641,22 @@ class SolarEdgePowerFlowCardEditor extends HTMLElement {
         <label>
           <span>Titel</span>
           <input data-path="title" value="${this._value("title", "SolarEdge Energiefluss")}" />
+        </label>
+        <label>
+          <span>Direkte SolarEdge API nutzen</span>
+          <input type="checkbox" data-path="use_direct_api" ${this._value("use_direct_api", false) ? "checked" : ""} />
+        </label>
+        <label>
+          <span>SolarEdge Site ID</span>
+          <input data-path="site_id" value="${this._value("site_id", "")}" />
+        </label>
+        <label>
+          <span>SolarEdge API Key</span>
+          <input data-path="api_key" value="${this._value("api_key", "")}" />
+        </label>
+        <label>
+          <span>API Polling (Sekunden)</span>
+          <input type="number" min="10" data-path="api_poll_seconds" value="${this._value("api_poll_seconds", 30)}" />
         </label>
         <span style="font-size:0.8rem; opacity:0.75;">
           Dropdowns zeigen bevorzugt passende SolarEdge-Entitaeten.
