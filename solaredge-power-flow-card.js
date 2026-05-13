@@ -1,4 +1,4 @@
-const SOLAREDGE_CARD_VERSION = "2026.05.13.9";
+const SOLAREDGE_CARD_VERSION = "2026.05.13.10";
 
 const FLOW_ACTIVE_EPS_KW = 0.0005;
 const FLOW_ARROW_SOLAR = "rgba(74,222,128,0.95)";
@@ -241,7 +241,7 @@ function buildPowerFlowSvgMarkup(flow, uid) {
       const a = shortenSegment(rawA1.x, rawA1.y, rawA2.x, rawA2.y, GAP_NODE, GAP_HUB);
       const aDash = retractStrokeEndBeforeArrowTip(a.x1, a.y1, a.x2, a.y2, STROKE_STOP_BEFORE_TIP_PX);
       lines.push(
-        `<line data-se-dash="1" data-se-flow="to-hub" x1="${aDash.x1}" y1="${aDash.y1}" x2="${aDash.x2}" y2="${aDash.y2}" stroke="${strokeIn}" stroke-width="${strokeW}" stroke-linecap="round" stroke-dasharray="10 16" stroke-dashoffset="0" />`
+        `<line class="se-dash-line se-dash-to-hub" x1="${aDash.x1}" y1="${aDash.y1}" x2="${aDash.x2}" y2="${aDash.y2}" stroke="${strokeIn}" stroke-width="${strokeW}" stroke-linecap="round" stroke-dasharray="10 16" />`
       );
       lines.push(
         `<line x1="${aDash.x2}" y1="${aDash.y2}" x2="${a.x2}" y2="${a.y2}" stroke="transparent" stroke-width="1" marker-end="url(#${markerIn})" pointer-events="none" />`
@@ -272,7 +272,7 @@ function buildPowerFlowSvgMarkup(flow, uid) {
     }
 
     lines.push(
-      `<line data-se-dash="1" data-se-flow="from-hub" x1="${bDash.x1}" y1="${bDash.y1}" x2="${bDash.x2}" y2="${bDash.y2}" stroke="${strokeOut}" stroke-width="${strokeW}" stroke-linecap="round" stroke-dasharray="10 16" stroke-dashoffset="0" />`
+      `<line class="se-dash-line se-dash-from-hub" x1="${bDash.x1}" y1="${bDash.y1}" x2="${bDash.x2}" y2="${bDash.y2}" stroke="${strokeOut}" stroke-width="${strokeW}" stroke-linecap="round" stroke-dasharray="10 16" />`
     );
     lines.push(
       `<line x1="${bDash.x2}" y1="${bDash.y2}" x2="${b.x2}" y2="${b.y2}" stroke="transparent" stroke-width="1" marker-end="url(#${markerOut})" pointer-events="none" />`
@@ -385,39 +385,6 @@ class SolarEdgePowerFlowCard extends HTMLElement {
     }
   }
 
-  _stopDashAnimation() {
-    if (this._dashRaf != null) {
-      cancelAnimationFrame(this._dashRaf);
-      this._dashRaf = null;
-    }
-  }
-
-  /** Strich-Animation nur auf farbigen Flusslinien; Richtung to-hub / from-hub. */
-  _startDashAnimation() {
-    this._stopDashAnimation();
-    const period = 26;
-    const speed = 0.016;
-    const t0 = performance.now();
-    const loop = () => {
-      if (!this.isConnected || !this.shadowRoot) return;
-      const els = this.shadowRoot.querySelectorAll("line[data-se-dash]");
-      if (!els.length) {
-        this._dashRaf = requestAnimationFrame(loop);
-        return;
-      }
-      const now = performance.now();
-      const base = -(((now - t0) * speed) % period);
-      for (let i = 0; i < els.length; i++) {
-        const el = els[i];
-        const fl = el.getAttribute("data-se-flow");
-        const dir = fl === "from-hub" ? 1 : -1;
-        el.setAttribute("stroke-dashoffset", (dir * base).toFixed(2));
-      }
-      this._dashRaf = requestAnimationFrame(loop);
-    };
-    this._dashRaf = requestAnimationFrame(loop);
-  }
-
   disconnectedCallback() {
     if (this._tickInterval) {
       clearInterval(this._tickInterval);
@@ -431,7 +398,6 @@ class SolarEdgePowerFlowCard extends HTMLElement {
       clearInterval(this._directApiInterval);
       this._directApiInterval = null;
     }
-    this._stopDashAnimation();
   }
 
   static getConfigElement() {
@@ -485,6 +451,8 @@ class SolarEdgePowerFlowCard extends HTMLElement {
     };
     this._setupRefreshInterval();
     this._setupDirectApiPolling();
+    this._lastFlowDigest = undefined;
+    if (this._hass) this._render();
   }
 
   set hass(hass) {
@@ -627,12 +595,7 @@ class SolarEdgePowerFlowCard extends HTMLElement {
     });
   }
 
-  _render() {
-    if (!this._hass || !this._config) return;
-
-    if (!this.shadowRoot) this.attachShadow({ mode: "open" });
-    this._stopDashAnimation();
-
+  _computeFlowModel() {
     const e = this._config.entities;
     const useDirectApi = Boolean(this._config.use_direct_api);
     const showBattery = Boolean(this._config.show_battery && (useDirectApi || e.battery_power));
@@ -675,7 +638,58 @@ class SolarEdgePowerFlowCard extends HTMLElement {
     }
     flowPayload = filterPowerFlowForBattery(flowPayload, showBattery);
 
-    const nowKw = this._formatKwFromW(pvW);
+    return {
+      pvW,
+      loadW,
+      gridW,
+      battW,
+      socRaw,
+      showBattery,
+      useDirectApi,
+      flowPayload,
+      nowKw: this._formatKwFromW(pvW),
+    };
+  }
+
+  _digestFromFlowModel(m) {
+    const rW = (w) => String(Math.round(Number(w) || 0));
+    const soc = Number.isFinite(m.socRaw) ? String(Math.round(m.socRaw * 10) / 10) : "x";
+    const conns = [...m.flowPayload.connections]
+      .map((c) => `${c.from}>${c.to}`)
+      .sort()
+      .join(",");
+    const nodes = [...m.flowPayload.nodes]
+      .map((n) => `${n.key}:${rW((n.powerKw || 0) * 1000)}:${n.chargeLevelPct ?? ""}:${n.status ?? ""}`)
+      .sort()
+      .join(";");
+    return [
+      m.useDirectApi ? 1 : 0,
+      rW(m.pvW),
+      rW(m.loadW),
+      rW(m.gridW),
+      rW(m.battW),
+      soc,
+      m.showBattery ? 1 : 0,
+      conns,
+      nodes,
+      this._config.title || "",
+    ].join("|");
+  }
+
+  _render() {
+    if (!this._hass || !this._config) return;
+
+    if (!this.shadowRoot) this.attachShadow({ mode: "open" });
+
+    const model = this._computeFlowModel();
+    const digest = this._digestFromFlowModel(model);
+    if (digest === this._lastFlowDigest && this.shadowRoot.querySelector("ha-card")) {
+      this._updateLiveClock();
+      return;
+    }
+    this._lastFlowDigest = digest;
+
+    const { flowPayload, nowKw } = model;
     const liveTime = new Date().toLocaleTimeString("de-DE");
     if (!this._flowSvgUid) this._flowSvgUid = `se${Math.random().toString(36).slice(2, 10)}`;
     const flowSvgInner = buildPowerFlowSvgMarkup(flowPayload, this._flowSvgUid);
@@ -754,6 +768,24 @@ class SolarEdgePowerFlowCard extends HTMLElement {
         height: auto;
         overflow: visible;
       }
+      @keyframes seFlowDashScroll {
+        to { stroke-dashoffset: -26; }
+      }
+      .se-flow-svg line.se-dash-line {
+        stroke-dasharray: 10 16;
+        stroke-dashoffset: 0;
+      }
+      .se-flow-svg line.se-dash-to-hub {
+        animation: seFlowDashScroll 1.35s linear infinite;
+      }
+      .se-flow-svg line.se-dash-from-hub {
+        animation: seFlowDashScroll 1.35s linear infinite reverse;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .se-flow-svg line.se-dash-line {
+          animation: none !important;
+        }
+      }
       .se-node-rect {
         fill: rgba(var(--rgb-primary-text-color), 0.07);
         stroke: rgba(var(--rgb-primary-text-color), 0.38);
@@ -790,7 +822,6 @@ class SolarEdgePowerFlowCard extends HTMLElement {
         </div>
       </ha-card>
     `;
-    this._startDashAnimation();
   }
 }
 
