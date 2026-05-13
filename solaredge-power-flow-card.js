@@ -1,4 +1,4 @@
-const SOLAREDGE_CARD_VERSION = "2026.05.13.12";
+const SOLAREDGE_CARD_VERSION = "2026.05.13.13";
 
 const FLOW_ACTIVE_EPS_KW = 0.0005;
 const FLOW_ARROW_SOLAR = "rgba(74,222,128,0.95)";
@@ -168,6 +168,137 @@ function escapeXml(s) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+/** YYYY-MM-DD im lokalen Kalender (für SolarEdge startDate/endDate). */
+function formatLocalYmd(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/** SolarEdge /site/…/energy (timeUnit=DAY) → Liste Tagesertrag kWh. */
+function parseSolarEdgeEnergy7d(json) {
+  const vals = json?.energy?.values;
+  if (!Array.isArray(vals)) return [];
+  const unit = String(json?.energy?.unit || "Wh").toLowerCase();
+  const toKwh = (v) => {
+    if (v == null || v === "") return null;
+    const n = Number(v);
+    if (!Number.isFinite(n)) return null;
+    if (unit === "kwh" || unit.includes("kwh")) return n;
+    return n / 1000;
+  };
+  const rows = [];
+  for (const row of vals) {
+    const raw = row?.date;
+    if (!raw) continue;
+    const kwh = toKwh(row.value);
+    const d = new Date(String(raw).replace(" ", "T"));
+    if (Number.isNaN(d.getTime())) continue;
+    rows.push({ t: d.getTime(), kwh });
+  }
+  rows.sort((a, b) => a.t - b.t);
+  return rows.slice(-7).map((r) => {
+    const d = new Date(r.t);
+    return {
+      key: formatLocalYmd(d),
+      kwh: r.kwh,
+      labelShort: d.toLocaleDateString("de-DE", { weekday: "short" }),
+      labelDay: d.toLocaleDateString("de-DE", { day: "numeric", month: "short" }),
+    };
+  });
+}
+
+/** HA History für täglich steigenden Ertragssensor (z. B. „heute“): pro Kalendertag max(State), Browser-Zeitzone. */
+function parseHistoryDailyMaxKwh(historyRows, _timeZone, daysBack) {
+  const dayKeyFromIso = (iso) => new Date(iso).toLocaleDateString("en-CA");
+  const buckets = new Map();
+  const flat = Array.isArray(historyRows?.[0]) ? historyRows[0] : [];
+  for (const st of flat) {
+    const v = Number(st?.state);
+    if (!Number.isFinite(v)) continue;
+    const k = dayKeyFromIso(st.last_changed || st.last_updated);
+    buckets.set(k, Math.max(buckets.get(k) ?? 0, v));
+  }
+  const out = [];
+  for (let i = daysBack - 1; i >= 0; i--) {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() - i);
+    const key = formatLocalYmd(d);
+    const kwh = buckets.has(key) ? buckets.get(key) : null;
+    out.push({
+      key,
+      kwh,
+      labelShort: d.toLocaleDateString("de-DE", { weekday: "short" }),
+      labelDay: d.toLocaleDateString("de-DE", { day: "numeric", month: "short" }),
+    });
+  }
+  return out;
+}
+
+function buildYield7dHtml(yieldBlock, cfg) {
+  if (!cfg || cfg.show_7d_yield === false) return "";
+  const useApi = Boolean(cfg.use_direct_api);
+  const eid = String(cfg.entities?.pv_energy_today || "").trim();
+  if (!useApi && !eid) {
+    return `
+    <div class="yield-7d">
+      <div class="yield-title">PV-Tagesertrag (7 Tage)</div>
+      <div class="yield-hint">Im Editor optional den Sensor „PV Tagesertrag / heute“ wählen (z. B. SolarEdge energy today).</div>
+    </div>`;
+  }
+  if (yieldBlock == null) {
+    return `
+    <div class="yield-7d">
+      <div class="yield-title">PV-Tagesertrag (7 Tage)</div>
+      <div class="yield-hint">Lade Verlauf…</div>
+    </div>`;
+  }
+  if (yieldBlock.error && !(yieldBlock.days?.length > 0)) {
+    return `
+    <div class="yield-7d">
+      <div class="yield-title">PV-Tagesertrag (7 Tage)</div>
+      <div class="yield-err">${escapeXml(yieldBlock.error)}</div>
+    </div>`;
+  }
+  const { days, error } = yieldBlock;
+  if (!days?.length) {
+    return `
+    <div class="yield-7d">
+      <div class="yield-title">PV-Tagesertrag (7 Tage)</div>
+      ${error ? `<div class="yield-err">${escapeXml(error)}</div>` : ""}
+      <div class="yield-hint">Keine Tageswerte im gewählten Zeitraum.</div>
+    </div>`;
+  }
+  const nums = days.map((d) => (d.kwh != null && Number.isFinite(d.kwh) ? d.kwh : 0));
+  const maxKwh = Math.max(...nums, 0.001);
+  const errLine = error ? `<div class="yield-err">${escapeXml(error)}</div>` : "";
+  const bars = days
+    .map((d) => {
+      const has = d.kwh != null && Number.isFinite(d.kwh);
+      const pct = has ? Math.max(6, Math.round((d.kwh / maxKwh) * 100)) : 4;
+      const val = has ? d.kwh.toLocaleString("de-DE", { minimumFractionDigits: 1, maximumFractionDigits: 1 }) : "–";
+      const title = `${d.labelShort} ${d.labelDay}: ${has ? `${val} kWh` : "keine Daten"}`;
+      return `
+        <div class="yield-col" title="${escapeXml(title)}">
+          <div class="yield-bar-wrap">
+            <div class="yield-bar" style="height:${pct}%"></div>
+          </div>
+          <div class="yield-lbl">${escapeXml(d.labelShort)}</div>
+          <div class="yield-sub">${escapeXml(d.labelDay)}</div>
+          <div class="yield-val">${escapeXml(val)}</div>
+        </div>`;
+    })
+    .join("");
+  return `
+    <div class="yield-7d">
+      <div class="yield-title">PV-Tagesertrag (7 Tage)</div>
+      ${errLine}
+      <div class="yield-bars">${bars}</div>
+    </div>`;
 }
 
 /**
@@ -428,8 +559,10 @@ class SolarEdgePowerFlowCard extends HTMLElement {
         grid_power: "",
         battery_power: "",
         battery_soc: "",
+        pv_energy_today: "",
       },
       show_battery: true,
+      show_7d_yield: true,
       watt_threshold_kw: 10,
       force_refresh_seconds: 0,
     };
@@ -456,11 +589,15 @@ class SolarEdgePowerFlowCard extends HTMLElement {
       entities: {
         battery_power: "",
         battery_soc: "",
+        pv_energy_today: "",
         ...(config.entities || {}),
       },
+      show_7d_yield: config.show_7d_yield !== false,
     };
     this._setupRefreshInterval();
     this._setupDirectApiPolling();
+    this._lastYieldHaOkAt = undefined;
+    this._yield7d = null;
     this._lastFlowDigest = undefined;
     if (this._hass) this._render();
   }
@@ -469,11 +606,12 @@ class SolarEdgePowerFlowCard extends HTMLElement {
     this._hass = hass;
     this._setupRefreshInterval();
     this._setupDirectApiPolling();
+    this._maybeFetchYield7dHa();
     this._render();
   }
 
   getCardSize() {
-    return 4;
+    return 6;
   }
 
   _setupRefreshInterval() {
@@ -512,7 +650,22 @@ class SolarEdgePowerFlowCard extends HTMLElement {
     const overviewUrl = `${base}/overview?api_key=${encodeURIComponent(apiKey)}`;
     const flowUrl = `${base}/currentPowerFlow?api_key=${encodeURIComponent(apiKey)}`;
 
-    const [overviewResp, flowResp] = await Promise.all([fetch(overviewUrl), fetch(flowUrl)]);
+    const showYield = this._config?.show_7d_yield !== false;
+    const endD = new Date();
+    const startD = new Date(endD);
+    startD.setDate(startD.getDate() - 6);
+    const sd = formatLocalYmd(startD);
+    const ed = formatLocalYmd(endD);
+    const energyUrl = showYield
+      ? `${base}/energy?api_key=${encodeURIComponent(apiKey)}&timeUnit=DAY&startDate=${encodeURIComponent(sd)}&endDate=${encodeURIComponent(ed)}`
+      : null;
+
+    const energyPromise = energyUrl ? fetch(energyUrl) : Promise.resolve(null);
+    const [overviewResp, flowResp, energyResp] = await Promise.all([
+      fetch(overviewUrl),
+      fetch(flowUrl),
+      energyPromise,
+    ]);
     if (!overviewResp.ok || !flowResp.ok) {
       throw new Error(`SolarEdge API Fehler (${overviewResp.status}/${flowResp.status})`);
     }
@@ -548,6 +701,26 @@ class SolarEdgePowerFlowCard extends HTMLElement {
     } else {
       this._directPowerFlow = normalized;
     }
+
+    if (showYield && energyResp) {
+      if (energyResp.ok) {
+        const energyJson = await energyResp.json();
+        this._yield7d = {
+          days: parseSolarEdgeEnergy7d(energyJson),
+          error: "",
+          source: "api",
+        };
+      } else {
+        this._yield7d = {
+          days: [],
+          error: `Tagesertrag (${energyResp.status})`,
+          source: "api",
+        };
+      }
+    } else if (!showYield) {
+      this._yield7d = null;
+    }
+
     this._directApiError = "";
   }
 
@@ -603,6 +776,60 @@ class SolarEdgePowerFlowCard extends HTMLElement {
       minimumFractionDigits: abs >= 10 ? 1 : 2,
       maximumFractionDigits: digits,
     });
+  }
+
+  _yieldDigest() {
+    if (this._config?.show_7d_yield === false) return "off";
+    const api = this._config?.use_direct_api ? "1" : "0";
+    const eid = String(this._config?.entities?.pv_energy_today || "").trim();
+    const y = this._yield7d;
+    const head = `${api}|${eid}|`;
+    if (!y) return `${head}null`;
+    if (y.error) return `${head}e:${String(y.error).slice(0, 80)}`;
+    if (!y.days?.length) return `${head}empty`;
+    return `${head}${y.days.map((x) => `${x.key}:${x.kwh == null ? "n" : Number(x.kwh).toFixed(3)}`).join(",")}`;
+  }
+
+  _maybeFetchYield7dHa() {
+    if (this._config?.show_7d_yield === false) return;
+    if (this._config?.use_direct_api) return;
+    const entityId = String(this._config?.entities?.pv_energy_today || "").trim();
+    if (!entityId || !this._hass?.callApi) return;
+    if (this._yieldHaInflight) return;
+    const now = Date.now();
+    const throttleMs = 15 * 60 * 1000;
+    if (this._lastYieldHaOkAt && now - this._lastYieldHaOkAt < throttleMs && this._yield7d?.days?.length) return;
+
+    this._yieldHaInflight = true;
+    (async () => {
+      try {
+        const end = new Date();
+        const start = new Date();
+        start.setDate(start.getDate() - 10);
+        const path = `history/period/${encodeURIComponent(start.toISOString())}?filter_entity_id=${encodeURIComponent(entityId)}&end_time=${encodeURIComponent(end.toISOString())}`;
+        const data = await this._hass.callApi("GET", path);
+        let days = parseHistoryDailyMaxKwh(data, null, 7);
+        const st = this._hass.states?.[entityId];
+        const unit = String(st?.attributes?.unit_of_measurement || "kWh").toLowerCase();
+        if (unit.includes("wh") && !unit.includes("kwh")) {
+          days = days.map((d) => ({
+            ...d,
+            kwh: d.kwh != null && Number.isFinite(d.kwh) ? d.kwh / 1000 : d.kwh,
+          }));
+        }
+        this._yield7d = { days, error: "", source: "hass" };
+      } catch (err) {
+        this._yield7d = {
+          days: [],
+          error: err?.message || "History-Abruf fehlgeschlagen",
+          source: "hass",
+        };
+      } finally {
+        this._yieldHaInflight = false;
+        this._lastYieldHaOkAt = Date.now();
+        this._render();
+      }
+    })();
   }
 
   _computeFlowModel() {
@@ -692,7 +919,9 @@ class SolarEdgePowerFlowCard extends HTMLElement {
     if (!this.shadowRoot) this.attachShadow({ mode: "open" });
 
     const model = this._computeFlowModel();
-    const digest = this._digestFromFlowModel(model);
+    const flowDigest = this._digestFromFlowModel(model);
+    const yieldDigest = this._yieldDigest();
+    const digest = `${flowDigest}|yield:${yieldDigest}`;
     if (digest === this._lastFlowDigest && this.shadowRoot.querySelector("ha-card")) {
       this._updateLiveClock();
       return;
@@ -703,6 +932,7 @@ class SolarEdgePowerFlowCard extends HTMLElement {
     const liveTime = new Date().toLocaleTimeString("de-DE");
     if (!this._flowSvgUid) this._flowSvgUid = `se${Math.random().toString(36).slice(2, 10)}`;
     const flowSvgInner = buildPowerFlowSvgMarkup(flowPayload, this._flowSvgUid);
+    const yieldHtml = buildYield7dHtml(this._yield7d, this._config);
 
     const styles = `
       :host { display:block; }
@@ -812,6 +1042,80 @@ class SolarEdgePowerFlowCard extends HTMLElement {
         opacity: 0.95;
         fill: var(--primary-text-color);
       }
+      .yield-7d {
+        margin-top: 12px;
+        padding-top: 10px;
+        border-top: 1px solid rgba(148, 163, 184, 0.2);
+      }
+      .yield-title {
+        text-align: center;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.18em;
+        color: var(--secondary-text-color);
+        margin-bottom: 10px;
+      }
+      .yield-hint,
+      .yield-err {
+        font-size: 0.72rem;
+        text-align: center;
+        color: var(--secondary-text-color);
+        line-height: 1.35;
+        margin-bottom: 8px;
+      }
+      .yield-err {
+        color: rgba(251, 146, 60, 0.95);
+      }
+      .yield-bars {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-end;
+        gap: 4px;
+        min-height: 118px;
+        padding: 0 2px 4px;
+      }
+      .yield-col {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 3px;
+      }
+      .yield-bar-wrap {
+        width: 100%;
+        max-width: 34px;
+        height: 72px;
+        margin: 0 auto;
+        display: flex;
+        align-items: flex-end;
+        justify-content: center;
+        border-radius: 6px;
+        background: rgba(15, 23, 42, 0.45);
+        border: 1px solid rgba(148, 163, 184, 0.15);
+      }
+      .yield-bar {
+        width: 100%;
+        border-radius: 5px 5px 2px 2px;
+        background: linear-gradient(to top, rgba(16, 185, 129, 0.35), rgba(74, 222, 128, 0.92));
+        min-height: 4px;
+      }
+      .yield-lbl {
+        font-size: 0.65rem;
+        font-weight: 600;
+        color: var(--primary-text-color);
+        text-transform: capitalize;
+      }
+      .yield-sub {
+        font-size: 0.58rem;
+        color: var(--secondary-text-color);
+      }
+      .yield-val {
+        font-size: 0.62rem;
+        font-weight: 600;
+        color: rgba(248, 113, 113, 0.95);
+      }
     `;
 
     this.shadowRoot.innerHTML = `
@@ -831,6 +1135,7 @@ class SolarEdgePowerFlowCard extends HTMLElement {
             ${flowSvgInner}
           </svg>
         </div>
+        ${yieldHtml}
       </ha-card>
     `;
   }
@@ -924,6 +1229,7 @@ class SolarEdgePowerFlowCardEditor extends HTMLElement {
       "entities.grid_power": ["grid", "import", "export", "meter", "power"],
       "entities.battery_power": ["battery", "charge", "discharge", "power"],
       "entities.battery_soc": ["battery", "soc", "state of charge", "%", "capacity"],
+      "entities.pv_energy_today": ["energy", "today", "daily", "yield", "production", "day"],
     };
     const keywords = keywordMap[path] || [];
 
@@ -997,6 +1303,11 @@ class SolarEdgePowerFlowCardEditor extends HTMLElement {
         ${this._selectRow("Netzleistung (+Bezug / -Einspeisung)", "entities.grid_power")}
         ${this._selectRow("Batterieleistung (+Entladen / -Laden)", "entities.battery_power")}
         ${this._selectRow("Batterie SoC (%)", "entities.battery_soc")}
+        ${this._selectRow("PV Tagesertrag (optional, für 7-Tage-Balken ohne API)", "entities.pv_energy_today")}
+        <label>
+          <span>7-Tage-Ertrag anzeigen</span>
+          <input type="checkbox" data-path="show_7d_yield" ${this._value("show_7d_yield", true) ? "checked" : ""} />
+        </label>
         <label>
           <span>Leistungsskalierung (kW)</span>
           <input type="number" data-path="watt_threshold_kw" value="${this._value("watt_threshold_kw", 10)}" />
@@ -1025,7 +1336,7 @@ window.customCards = window.customCards || [];
 window.customCards.push({
   type: "solaredge-power-flow-card",
   name: "SolarEdge Power Flow Card",
-  description: "Visualisiert PV, Haus, Netz und Batterie in einer modernen Energiefluss-Karte.",
+  description: "Visualisiert PV, Haus, Netz, Batterie, 7-Tage-Ertrag und Leistungsfluss.",
   version: SOLAREDGE_CARD_VERSION,
   preview: true,
 });
