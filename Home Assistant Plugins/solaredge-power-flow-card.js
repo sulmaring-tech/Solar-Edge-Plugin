@@ -75,6 +75,17 @@ class SolarEdgePowerFlowCard extends HTMLElement {
     return `${Math.round(soc)}%`;
   }
 
+  _formatKwFromW(watts) {
+    if (!Number.isFinite(watts)) return "-";
+    const kw = watts / 1000;
+    const abs = Math.abs(kw);
+    const digits = abs >= 10 ? 1 : abs >= 1 ? 2 : 3;
+    return kw.toLocaleString("de-DE", {
+      minimumFractionDigits: abs >= 10 ? 1 : 2,
+      maximumFractionDigits: digits,
+    });
+  }
+
   _clamp01(n) {
     return Math.max(0, Math.min(1, n));
   }
@@ -110,121 +121,216 @@ class SolarEdgePowerFlowCard extends HTMLElement {
 
     const p2home = Math.max(0, Math.min(pvW, loadW));
     const pvExtra = Math.max(0, pvW - p2home);
-    const battDischarge = Math.max(0, battW);
     const battCharge = Math.max(0, -battW);
     const gridImport = Math.max(0, gridW);
     const gridExport = Math.max(0, -gridW);
 
+    const netW = gridImport - gridExport;
+    const nowKw = this._formatKwFromW(pvW);
     const widthMaxKW = Number(this._config.watt_threshold_kw) || 10;
+    const activeEps = 8;
+    const activePv = Math.abs(pvW) > activeEps;
+    const activeLoad = Math.abs(loadW) > activeEps;
+    const activeGrid = Math.abs(netW) > activeEps;
+    const activeBatt = showBattery && Math.abs(battW) > activeEps;
 
     const styles = `
       :host { display:block; }
       ha-card {
-        padding: 16px;
-        border-radius: 16px;
+        padding: 14px;
+        border-radius: 18px;
+        border: 1px solid rgba(148, 163, 184, 0.28);
+        background:
+          radial-gradient(circle at top right, rgba(239, 68, 68, 0.14), transparent 40%),
+          radial-gradient(circle at top left, rgba(16, 185, 129, 0.10), transparent 42%),
+          rgba(15, 23, 42, 0.55);
       }
       .title {
-        font-size: 1.1rem;
+        font-size: 1rem;
         font-weight: 600;
-        margin-bottom: 12px;
+        margin-bottom: 10px;
+        color: var(--primary-text-color);
       }
-      .grid {
-        display: grid;
-        grid-template-columns: 1fr 1fr 1fr;
-        grid-template-rows: auto auto;
-        gap: 10px;
-        align-items: center;
-      }
-      .node {
-        background: rgba(var(--rgb-primary-text-color), 0.04);
-        border: 1px solid rgba(var(--rgb-primary-text-color), 0.08);
-        border-radius: 12px;
+      .hero {
+        border: 1px solid rgba(148, 163, 184, 0.24);
+        border-radius: 14px;
+        background: rgba(2, 6, 23, 0.35);
         padding: 10px 12px;
+        margin-bottom: 10px;
         text-align: center;
       }
-      .node .label {
-        font-size: 0.8rem;
-        opacity: 0.8;
+      .hero-label {
+        font-size: 0.68rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--secondary-text-color);
+      }
+      .hero-value {
+        margin-top: 4px;
+        font-size: 2rem;
+        line-height: 1;
+        font-weight: 300;
+        letter-spacing: -0.02em;
+      }
+      .hero-value .unit {
+        font-size: 1rem;
+        color: rgba(248, 113, 113, 0.92);
+        font-weight: 600;
+      }
+      .flow-wrap {
+        border: 1px solid rgba(148, 163, 184, 0.2);
+        border-radius: 14px;
+        background: rgba(2, 6, 23, 0.25);
+        padding: 8px;
+      }
+      .flow-title {
+        font-size: 0.66rem;
+        text-transform: uppercase;
+        letter-spacing: 0.14em;
+        text-align: center;
+        color: var(--secondary-text-color);
         margin-bottom: 4px;
       }
-      .node .value {
-        font-size: 1.1rem;
+      svg {
+        width: 100%;
+        height: auto;
+      }
+      .node-box {
+        fill: rgba(15, 23, 42, 0.58);
+        stroke: rgba(148, 163, 184, 0.33);
+        stroke-width: 1;
+      }
+      .node-icon {
+        font-size: 13px;
+        opacity: 0.95;
+      }
+      .node-kw {
+        fill: #f87171;
+        font-size: 12px;
         font-weight: 700;
       }
-      .center {
-        position: relative;
+      .node-sub {
+        fill: rgba(203, 213, 225, 0.85);
+        font-size: 8px;
       }
-      .lines {
+      .line-base {
+        stroke: rgba(148, 163, 184, 0.30);
+        stroke-width: 1.2;
+        stroke-linecap: round;
+      }
+      .line-active-green {
+        stroke: rgba(74, 222, 128, 0.95);
+        stroke-width: 2.2;
+        stroke-linecap: round;
+      }
+      .line-active-orange {
+        stroke: rgba(251, 146, 60, 0.95);
+        stroke-width: 2.2;
+        stroke-linecap: round;
+      }
+      .stats {
+        margin-top: 10px;
         display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 8px;
       }
-      .line {
-        height: 8px;
-        border-radius: 999px;
-        background: rgba(var(--rgb-primary-text-color), 0.18);
-        transition: all 0.3s ease;
+      .chip {
+        border: 1px solid rgba(148, 163, 184, 0.26);
+        border-radius: 12px;
+        padding: 8px 10px;
+        background: rgba(2, 6, 23, 0.25);
       }
-      .flow-positive {
-        background: linear-gradient(90deg, var(--success-color), rgba(var(--rgb-success-color), 0.5));
+      .chip-label {
+        font-size: 0.65rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--secondary-text-color);
       }
-      .flow-negative {
-        background: linear-gradient(90deg, var(--warning-color), rgba(var(--rgb-warning-color), 0.5));
-      }
-      .battery-row {
-        grid-column: 2 / span 1;
-      }
-      .battery-soc {
-        margin-top: 6px;
-        font-size: 0.8rem;
-        opacity: 0.75;
+      .chip-value {
+        margin-top: 2px;
+        font-size: 0.95rem;
+        font-weight: 700;
+        color: var(--primary-text-color);
       }
       .meta {
-        margin-top: 12px;
+        margin-top: 10px;
         font-size: 0.8rem;
-        opacity: 0.75;
+        color: var(--secondary-text-color);
+        text-align: center;
       }
     `;
+
+    const pPv = { x: 110, y: 30 };
+    const pLoad = { x: 34, y: 94 };
+    const pGrid = { x: 186, y: 94 };
+    const pBatt = { x: 110, y: 158 };
+    const pHub = { x: 110, y: 94 };
+
+    const drawLine = (from, to, active, orange = false) => {
+      const cls = active ? (orange ? "line-active-orange" : "line-active-green") : "line-base";
+      return `<line x1="${from.x}" y1="${from.y}" x2="${to.x}" y2="${to.y}" class="${cls}" />`;
+    };
+
+    const batterySub = showBattery && e.battery_soc ? `SoC ${this._formatSoc(socRaw)}` : " ";
 
     this.shadowRoot.innerHTML = `
       <style>${styles}</style>
       <ha-card>
         <div class="title">${this._config.title}</div>
-        <div class="grid">
-          <div class="node">
-            <div class="label">PV</div>
-            <div class="value">${this._formatPower(pvW)}</div>
-          </div>
-          <div class="center lines">
-            <div
-              class="line ${this._flowClass(p2home)}"
-              style="width:${this._lineWidthFromPower(Math.abs(p2home), widthMaxKW)}px"
-              title="PV -> Haus: ${this._formatPower(p2home)}"
-            ></div>
-            <div
-              class="line ${this._flowClass(gridImport - gridExport)}"
-              style="width:${this._lineWidthFromPower(Math.abs(gridImport - gridExport), widthMaxKW)}px"
-              title="Netzfluss: ${this._formatPower(gridImport - gridExport)}"
-            ></div>
-          </div>
-          <div class="node">
-            <div class="label">Haus</div>
-            <div class="value">${this._formatPower(loadW)}</div>
-          </div>
+        <div class="hero">
+          <div class="hero-label">Leistung jetzt</div>
+          <div class="hero-value">${nowKw}<span class="unit"> kW</span></div>
+        </div>
+        <div class="flow-wrap">
+          <div class="flow-title">Leistungsfluss</div>
+          <svg viewBox="0 0 220 190" role="img" aria-label="SolarEdge Leistungsfluss">
+            ${drawLine(pPv, pHub, activePv)}
+            ${drawLine(pHub, pLoad, activeLoad, netW > activeEps)}
+            ${drawLine(pHub, pGrid, activeGrid, netW > activeEps)}
+            ${showBattery ? drawLine(pHub, pBatt, activeBatt) : ""}
 
-          <div class="node">
-            <div class="label">Netz</div>
-            <div class="value">${this._formatPower(gridImport - gridExport)}</div>
+            <rect x="84" y="80" width="52" height="28" rx="8" class="node-box"></rect>
+            <text x="110" y="98" text-anchor="middle" class="node-icon">⚙</text>
+
+            <g transform="translate(78,6)">
+              <rect width="64" height="52" rx="10" class="node-box"></rect>
+              <text x="32" y="16" text-anchor="middle" class="node-icon">☀</text>
+              <text x="32" y="34" text-anchor="middle" class="node-kw">${this._formatKwFromW(pvW)} kW</text>
+              <text x="32" y="46" text-anchor="middle" class="node-sub">PV</text>
+            </g>
+
+            <g transform="translate(2,68)">
+              <rect width="64" height="52" rx="10" class="node-box"></rect>
+              <text x="32" y="16" text-anchor="middle" class="node-icon">🏠</text>
+              <text x="32" y="34" text-anchor="middle" class="node-kw">${this._formatKwFromW(loadW)} kW</text>
+              <text x="32" y="46" text-anchor="middle" class="node-sub">Haus</text>
+            </g>
+
+            <g transform="translate(154,68)">
+              <rect width="64" height="52" rx="10" class="node-box"></rect>
+              <text x="32" y="16" text-anchor="middle" class="node-icon">⚡</text>
+              <text x="32" y="34" text-anchor="middle" class="node-kw">${this._formatKwFromW(netW)} kW</text>
+              <text x="32" y="46" text-anchor="middle" class="node-sub">Netz</text>
+            </g>
+
+            ${showBattery ? `
+            <g transform="translate(78,132)">
+              <rect width="64" height="52" rx="10" class="node-box"></rect>
+              <text x="32" y="16" text-anchor="middle" class="node-icon">🔋</text>
+              <text x="32" y="34" text-anchor="middle" class="node-kw">${this._formatKwFromW(battW)} kW</text>
+              <text x="32" y="46" text-anchor="middle" class="node-sub">${batterySub}</text>
+            </g>
+            ` : ""}
+          </svg>
+        </div>
+        <div class="stats">
+          <div class="chip">
+            <div class="chip-label">PV Ueberschuss</div>
+            <div class="chip-value">${this._formatPower(Math.max(0, pvExtra - battCharge + gridExport))}</div>
           </div>
-          ${showBattery ? `
-          <div class="node battery-row">
-            <div class="label">Batterie</div>
-            <div class="value">${this._formatPower(battW)}</div>
-            ${e.battery_soc ? `<div class="battery-soc">SoC: ${this._formatSoc(socRaw)}</div>` : ""}
-          </div>
-          ` : '<div></div>'}
-          <div class="node">
-            <div class="label">PV Überschuss</div>
-            <div class="value">${this._formatPower(Math.max(0, pvExtra - battCharge + gridExport))}</div>
+          <div class="chip">
+            <div class="chip-label">Netzrichtung</div>
+            <div class="chip-value">${netW >= 0 ? "Bezug" : "Einspeisung"}</div>
           </div>
         </div>
         <div class="meta">
