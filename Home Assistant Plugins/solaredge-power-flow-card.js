@@ -1,3 +1,5 @@
+const SOLAREDGE_CARD_VERSION = "2026.05.13.2";
+
 class SolarEdgePowerFlowCard extends HTMLElement {
   static getConfigElement() {
     return document.createElement("solaredge-power-flow-card-editor");
@@ -258,6 +260,13 @@ class SolarEdgePowerFlowCard extends HTMLElement {
         color: var(--secondary-text-color);
         text-align: center;
       }
+      .version {
+        margin-top: 4px;
+        font-size: 0.68rem;
+        color: var(--secondary-text-color);
+        text-align: center;
+        opacity: 0.8;
+      }
     `;
 
     const pPv = { x: 110, y: 30 };
@@ -336,6 +345,7 @@ class SolarEdgePowerFlowCard extends HTMLElement {
         <div class="meta">
           Batterie + = Entladen, - = Laden | Netz + = Bezug, - = Einspeisung
         </div>
+        <div class="version">Version ${SOLAREDGE_CARD_VERSION}</div>
       </ha-card>
     `;
   }
@@ -501,5 +511,8 @@ window.customCards.push({
   type: "solaredge-power-flow-card",
   name: "SolarEdge Power Flow Card",
   description: "Visualisiert PV, Haus, Netz und Batterie in einer modernen Energiefluss-Karte.",
+  version: SOLAREDGE_CARD_VERSION,
   preview: true,
 });
+
+console.info(`SolarEdge Power Flow Card loaded (v${SOLAREDGE_CARD_VERSION})`);

@@ -42,3 +42,14 @@ watt_threshold_kw: 10
 - `battery_power`: `+` = Entladen, `-` = Laden
 
 Falls deine Sensoren anders herum arbeiten, kannst du in Home Assistant einen Template-Sensor mit invertiertem Vorzeichen anlegen.
+
+## Update-Workflow (gegen Browser-Cache)
+
+Bei Updates der Card:
+
+1. Nach GitHub pushen und in HACS `Redownload` ausfuehren.
+2. In Home Assistant unter Dashboard-Ressourcen die URL mit Versionsparameter pflegen, z. B.:
+   - `/hacsfiles/Solar-Edge-Plugin/solaredge-power-flow-card.js?v=2026.05.13.2`
+3. Browser mit `Strg+F5` hart neu laden.
+
+Die Card zeigt unten die geladene Version an. Damit kannst du sofort sehen, ob wirklich die neue Datei aktiv ist.
