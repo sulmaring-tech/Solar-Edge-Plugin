@@ -1,4 +1,4 @@
-const SOLAREDGE_CARD_VERSION = "2026.05.13.3";
+const SOLAREDGE_CARD_VERSION = "2026.05.13.4";
 
 const FLOW_ACTIVE_EPS_KW = 0.008;
 const FLOW_ARROW_SOLAR = "rgba(74,222,128,0.95)";
@@ -364,10 +364,18 @@ function buildPowerFlowSvgMarkup(flow, uid) {
 class SolarEdgePowerFlowCard extends HTMLElement {
   connectedCallback() {
     if (this._tickInterval) return;
-    // Repaint periodically so the "Live" timestamp updates even if no new state arrives.
-    this._tickInterval = setInterval(() => this._render(), 1000);
+    // Nur die Uhr aktualisieren — kein komplettes Re-Render: sonst starten SVG/CSS-Animationen jede Sekunde neu.
+    this._tickInterval = setInterval(() => this._updateLiveClock(), 1000);
     this._setupRefreshInterval();
     this._setupDirectApiPolling();
+  }
+
+  _updateLiveClock() {
+    if (!this.shadowRoot) return;
+    const live = this.shadowRoot.querySelector(".live");
+    if (live) {
+      live.textContent = `Live ${new Date().toLocaleTimeString("de-DE")}`;
+    }
   }
 
   disconnectedCallback() {
@@ -434,6 +442,7 @@ class SolarEdgePowerFlowCard extends HTMLElement {
         ...(config.entities || {}),
       },
     };
+    this._setupRefreshInterval();
     this._setupDirectApiPolling();
   }
 
@@ -449,6 +458,7 @@ class SolarEdgePowerFlowCard extends HTMLElement {
   }
 
   _setupRefreshInterval() {
+    // Bei direkter SolarEdge-API: Daten kommen per api_poll_seconds — HA-Entities nicht anfassen.
     if (this._config?.use_direct_api) return;
     if (this._refreshInterval) {
       clearInterval(this._refreshInterval);
@@ -528,7 +538,7 @@ class SolarEdgePowerFlowCard extends HTMLElement {
     const apiKey = String(this._config?.api_key || "").trim();
     if (!siteId || !apiKey) return;
 
-    const secs = Math.max(10, Number(this._config?.api_poll_seconds || 30));
+    const secs = Math.max(5, Number(this._config?.api_poll_seconds || 30));
     const doFetch = async () => {
       try {
         await this._fetchDirectApiData();
@@ -895,7 +905,7 @@ class SolarEdgePowerFlowCardEditor extends HTMLElement {
         </label>
         <label>
           <span>API Polling (Sekunden)</span>
-          <input type="number" min="10" data-path="api_poll_seconds" value="${this._value("api_poll_seconds", 30)}" />
+          <input type="number" min="5" data-path="api_poll_seconds" value="${this._value("api_poll_seconds", 30)}" />
         </label>
         <span style="font-size:0.8rem; opacity:0.75;">
           Dropdowns zeigen bevorzugt passende SolarEdge-Entitaeten.
