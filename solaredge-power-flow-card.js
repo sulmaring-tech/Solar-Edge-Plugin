@@ -1,6 +1,19 @@
 const SOLAREDGE_CARD_VERSION = "2026.05.13.2";
 
 class SolarEdgePowerFlowCard extends HTMLElement {
+  connectedCallback() {
+    if (this._tickInterval) return;
+    // Repaint periodically so the "Live" timestamp updates even if no new state arrives.
+    this._tickInterval = setInterval(() => this._render(), 1000);
+  }
+
+  disconnectedCallback() {
+    if (this._tickInterval) {
+      clearInterval(this._tickInterval);
+      this._tickInterval = null;
+    }
+  }
+
   static getConfigElement() {
     return document.createElement("solaredge-power-flow-card-editor");
   }
@@ -129,12 +142,12 @@ class SolarEdgePowerFlowCard extends HTMLElement {
 
     const netW = gridImport - gridExport;
     const nowKw = this._formatKwFromW(pvW);
-    const widthMaxKW = Number(this._config.watt_threshold_kw) || 10;
     const activeEps = 8;
     const activePv = Math.abs(pvW) > activeEps;
     const activeLoad = Math.abs(loadW) > activeEps;
     const activeGrid = Math.abs(netW) > activeEps;
     const activeBatt = showBattery && Math.abs(battW) > activeEps;
+    const liveTime = new Date().toLocaleTimeString("de-DE");
 
     const styles = `
       :host { display:block; }
@@ -150,8 +163,19 @@ class SolarEdgePowerFlowCard extends HTMLElement {
       .title {
         font-size: 1rem;
         font-weight: 600;
-        margin-bottom: 10px;
+        margin-bottom: 8px;
         color: var(--primary-text-color);
+      }
+      .card-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+      }
+      .live {
+        font-size: 0.72rem;
+        color: rgba(74, 222, 128, 0.95);
+        white-space: nowrap;
       }
       .hero {
         border: 1px solid rgba(148, 163, 184, 0.24);
@@ -254,19 +278,6 @@ class SolarEdgePowerFlowCard extends HTMLElement {
         font-weight: 700;
         color: var(--primary-text-color);
       }
-      .meta {
-        margin-top: 10px;
-        font-size: 0.8rem;
-        color: var(--secondary-text-color);
-        text-align: center;
-      }
-      .version {
-        margin-top: 4px;
-        font-size: 0.68rem;
-        color: var(--secondary-text-color);
-        text-align: center;
-        opacity: 0.8;
-      }
     `;
 
     const pPv = { x: 110, y: 30 };
@@ -285,7 +296,10 @@ class SolarEdgePowerFlowCard extends HTMLElement {
     this.shadowRoot.innerHTML = `
       <style>${styles}</style>
       <ha-card>
-        <div class="title">${this._config.title}</div>
+        <div class="card-head">
+          <div class="title">${this._config.title}</div>
+          <div class="live">Live ${liveTime}</div>
+        </div>
         <div class="hero">
           <div class="hero-label">Leistung jetzt</div>
           <div class="hero-value">${nowKw}<span class="unit"> kW</span></div>
@@ -342,10 +356,6 @@ class SolarEdgePowerFlowCard extends HTMLElement {
             <div class="chip-value">${netW >= 0 ? "Bezug" : "Einspeisung"}</div>
           </div>
         </div>
-        <div class="meta">
-          Batterie + = Entladen, - = Laden | Netz + = Bezug, - = Einspeisung
-        </div>
-        <div class="version">Version ${SOLAREDGE_CARD_VERSION}</div>
       </ha-card>
     `;
   }
