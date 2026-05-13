@@ -471,7 +471,17 @@ class SolarEdgePowerFlowCardEditor extends HTMLElement {
         .wrap { display:grid; gap:10px; padding:6px 2px; }
         label { display:grid; gap:4px; font-size:0.9rem; }
         span { opacity:0.85; }
-        input, select { padding:8px; border-radius:8px; border:1px solid rgba(127,127,127,0.35); background:transparent; color:inherit; }
+        input, select {
+          padding: 8px;
+          border-radius: 8px;
+          border: 1px solid rgba(148, 163, 184, 0.45);
+          background: rgba(15, 23, 42, 0.92);
+          color: #e2e8f0;
+        }
+        select option {
+          background: #0f172a;
+          color: #e2e8f0;
+        }
       </style>
       <div class="wrap">
         <label>
