@@ -5,12 +5,17 @@ class SolarEdgePowerFlowCard extends HTMLElement {
     if (this._tickInterval) return;
     // Repaint periodically so the "Live" timestamp updates even if no new state arrives.
     this._tickInterval = setInterval(() => this._render(), 1000);
+    this._setupRefreshInterval();
   }
 
   disconnectedCallback() {
     if (this._tickInterval) {
       clearInterval(this._tickInterval);
       this._tickInterval = null;
+    }
+    if (this._refreshInterval) {
+      clearInterval(this._refreshInterval);
+      this._refreshInterval = null;
     }
   }
 
@@ -31,6 +36,7 @@ class SolarEdgePowerFlowCard extends HTMLElement {
       },
       show_battery: true,
       watt_threshold_kw: 10,
+      force_refresh_seconds: 0,
     };
   }
 
@@ -43,6 +49,7 @@ class SolarEdgePowerFlowCard extends HTMLElement {
       title: "SolarEdge Energiefluss",
       show_battery: true,
       watt_threshold_kw: 10,
+      force_refresh_seconds: 0,
       ...config,
       entities: {
         battery_power: "",
@@ -54,11 +61,29 @@ class SolarEdgePowerFlowCard extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
+    this._setupRefreshInterval();
     this._render();
   }
 
   getCardSize() {
     return 4;
+  }
+
+  _setupRefreshInterval() {
+    if (this._refreshInterval) {
+      clearInterval(this._refreshInterval);
+      this._refreshInterval = null;
+    }
+
+    const secs = Number(this._config?.force_refresh_seconds || 0);
+    if (!this._hass || !Number.isFinite(secs) || secs <= 0) return;
+
+    const ids = Object.values(this._config.entities || {}).filter(Boolean);
+    if (!ids.length) return;
+
+    this._refreshInterval = setInterval(() => {
+      this._hass.callService("homeassistant", "update_entity", { entity_id: ids });
+    }, Math.max(5, secs) * 1000);
   }
 
   _stateValue(entityId, fallback = 0) {
@@ -509,6 +534,10 @@ class SolarEdgePowerFlowCardEditor extends HTMLElement {
         <label>
           <span>Leistungsskalierung (kW)</span>
           <input type="number" data-path="watt_threshold_kw" value="${this._value("watt_threshold_kw", 10)}" />
+        </label>
+        <label>
+          <span>Auto-Refresh (Sekunden, 0 = aus)</span>
+          <input type="number" min="0" data-path="force_refresh_seconds" value="${this._value("force_refresh_seconds", 0)}" />
         </label>
         <label>
           <span>Batterie anzeigen</span>
