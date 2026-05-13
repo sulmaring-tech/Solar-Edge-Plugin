@@ -1,4 +1,365 @@
-const SOLAREDGE_CARD_VERSION = "2026.05.13.2";
+const SOLAREDGE_CARD_VERSION = "2026.05.13.3";
+
+const FLOW_ACTIVE_EPS_KW = 0.008;
+const FLOW_ARROW_SOLAR = "rgba(74,222,128,0.95)";
+const FLOW_ARROW_GRID_IMPORT = "rgba(251,146,60,0.95)";
+const FLOW_MARKER_SOLAR_FILL = "rgba(74,222,128,0.98)";
+const FLOW_MARKER_GRID_IMPORT_FILL = "rgba(251,146,60,0.98)";
+const FLOW_KW_COLOR = "#f87171";
+const FLOW_KW_UNIT_COLOR = "rgba(248,113,113,0.82)";
+
+function borderToward(cx, cy, hw, hh, tx, ty) {
+  const dx = tx - cx;
+  const dy = ty - cy;
+  const adx = Math.abs(dx);
+  const ady = Math.abs(dy);
+  if (adx < 1e-9 && ady < 1e-9) return { x: cx, y: cy };
+  const sx = adx < 1e-9 ? Infinity : hw / adx;
+  const sy = ady < 1e-9 ? Infinity : hh / ady;
+  const sc = Math.min(sx, sy);
+  return { x: cx + dx * sc, y: cy + dy * sc };
+}
+
+function shortenSegment(x1, y1, x2, y2, insetFrom1, insetFrom2) {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const len = Math.hypot(dx, dy);
+  if (len < 1e-6) return { x1, y1, x2, y2 };
+  if (len <= insetFrom1 + insetFrom2 + 0.25) {
+    const mx = (x1 + x2) / 2;
+    const my = (y1 + y2) / 2;
+    return { x1: mx, y1: my, x2: mx, y2: my };
+  }
+  const ux = dx / len;
+  const uy = dy / len;
+  return {
+    x1: x1 + ux * insetFrom1,
+    y1: y1 + uy * insetFrom1,
+    x2: x2 - ux * insetFrom2,
+    y2: y2 - uy * insetFrom2,
+  };
+}
+
+function retractStrokeEndBeforeArrowTip(x1, y1, x2, y2, retractPx) {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const len = Math.hypot(dx, dy);
+  if (len < 1e-6 || retractPx <= 0) return { x1, y1, x2, y2 };
+  const r = Math.min(retractPx, Math.max(0, len - 0.75));
+  const ux = dx / len;
+  const uy = dy / len;
+  return { x1, y1, x2: x2 - ux * r, y2: y2 - uy * r };
+}
+
+function storageStatusDe(status) {
+  if (!status?.trim()) return undefined;
+  const u = status.toLowerCase();
+  if (u.includes("discharg")) return "Entlädt";
+  if (u.includes("charg")) return "Lädt";
+  if (u.includes("idle")) return "Bereit";
+  return status;
+}
+
+function normalizePowerFlowFromApi(siteFlow) {
+  if (!siteFlow || typeof siteFlow !== "object") return null;
+  const unit = (siteFlow.unit || "W").toString().toLowerCase();
+  const toKw = (v) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return 0;
+    if (unit === "kw") return n;
+    if (Math.abs(n) < 50) return n;
+    return n / 1000;
+  };
+
+  const keyMap = { PRODUCTION: "PV", CONSUMPTION: "LOAD", FEEDIN: "GRID", PURCHASE: "GRID", STORAGE: "STORAGE" };
+  const nodes = [];
+  const nodeKeys = ["PV", "LOAD", "GRID", "STORAGE"];
+  for (const key of nodeKeys) {
+    const raw = siteFlow[key];
+    if (!raw || typeof raw !== "object") continue;
+    const powerKw = toKw(raw.currentPower ?? raw.power ?? 0);
+    const chargeLevelPct =
+      key === "STORAGE" && raw.chargeLevel != null
+        ? Number(raw.chargeLevel)
+        : key === "STORAGE" && raw.chargeLevelPercent != null
+          ? Number(raw.chargeLevelPercent)
+          : undefined;
+    nodes.push({
+      key,
+      powerKw,
+      chargeLevelPct: Number.isFinite(chargeLevelPct) ? chargeLevelPct : undefined,
+      status: raw.status,
+    });
+  }
+
+  let connections = Array.isArray(siteFlow.connections) ? siteFlow.connections : [];
+  connections = connections
+    .map((c) => ({
+      from: keyMap[c.from] || c.from,
+      to: keyMap[c.to] || c.to,
+    }))
+    .filter((c) => nodeKeys.includes(c.from) && nodeKeys.includes(c.to));
+
+  if (!nodes.length) return null;
+  return { nodes, connections };
+}
+
+function buildSyntheticPowerFlow(pvW, loadW, gridW, battW, socRaw, showBattery) {
+  const epsW = 8;
+  const pvKw = pvW / 1000;
+  const loadKw = loadW / 1000;
+  const gridKw = gridW / 1000;
+  const battKw = battW / 1000;
+  const nodes = [
+    { key: "PV", powerKw: pvKw },
+    { key: "LOAD", powerKw: loadKw },
+    { key: "GRID", powerKw: gridKw },
+  ];
+  if (showBattery) {
+    nodes.push({
+      key: "STORAGE",
+      powerKw: battKw,
+      chargeLevelPct: Number.isFinite(socRaw) ? socRaw : undefined,
+    });
+  }
+
+  const W = (w) => Math.abs(w) > epsW;
+  const connections = [];
+  if (W(pvW) && W(loadW) && pvW > 0 && loadW > 0) connections.push({ from: "PV", to: "LOAD" });
+  if (W(pvW) && gridW < -epsW) connections.push({ from: "PV", to: "GRID" });
+  if (showBattery && W(pvW) && battW < -epsW) connections.push({ from: "PV", to: "STORAGE" });
+  if (W(gridW) && gridW > epsW && W(loadW)) connections.push({ from: "GRID", to: "LOAD" });
+  if (showBattery && W(battW) && battW > epsW && W(loadW)) connections.push({ from: "STORAGE", to: "LOAD" });
+  if (W(loadW) && gridW < -epsW) connections.push({ from: "LOAD", to: "GRID" });
+  if (showBattery && W(battW) && battW < -epsW && W(gridW) && gridW > epsW) {
+    connections.push({ from: "GRID", to: "STORAGE" });
+  }
+
+  const seen = new Set();
+  const uniq = [];
+  for (const c of connections) {
+    const k = `${c.from}->${c.to}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    uniq.push(c);
+  }
+  return { nodes, connections: uniq };
+}
+
+function filterPowerFlowForBattery(flow, showBattery) {
+  if (showBattery) return flow;
+  return {
+    nodes: flow.nodes.filter((n) => n.key !== "STORAGE"),
+    connections: flow.connections.filter((c) => c.from !== "STORAGE" && c.to !== "STORAGE"),
+  };
+}
+
+function escapeXml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function buildPowerFlowSvgMarkup(flow, uid) {
+  const arrowGreen = `${uid}g`;
+  const arrowOrange = `${uid}o`;
+
+  const hubCx = 142;
+  const hubCy = 100;
+  const hubW = 42;
+  const hubH = 30;
+  const hwBox = hubW / 2;
+  const hhBox = hubH / 2;
+  const ARM_Y = 88;
+  const ARM_X = ARM_Y + hwBox - hhBox;
+  const GAP_NODE = 12;
+  const GAP_HUB = 10;
+  const STROKE_STOP_BEFORE_TIP_PX = 7.5;
+
+  const pos = {
+    PV: { x: hubCx, y: hubCy - ARM_Y },
+    LOAD: { x: hubCx - ARM_X, y: hubCy },
+    GRID: { x: hubCx + ARM_X, y: hubCy },
+    STORAGE: { x: hubCx, y: hubCy + ARM_Y },
+  };
+
+  const nodeMap = new Map(flow.nodes.map((n) => [n.key, n]));
+  const boxW = 64;
+  const boxH = 64;
+  const hbW = boxW / 2;
+  const hbH = boxH / 2;
+
+  const connectionActive = (from, to) =>
+    Math.abs(nodeMap.get(from)?.powerKw ?? 0) > FLOW_ACTIVE_EPS_KW ||
+    Math.abs(nodeMap.get(to)?.powerKw ?? 0) > FLOW_ACTIVE_EPS_KW;
+
+  const renderOrder = ["PV", "LOAD", "GRID", "STORAGE"];
+  const spokes = [];
+  for (const k of renderOrder) {
+    if (!nodeMap.has(k)) continue;
+    const p = pos[k];
+    const raw1 = borderToward(p.x, p.y, hbW, hbH, hubCx, hubCy);
+    const raw2 = borderToward(hubCx, hubCy, hwBox, hhBox, p.x, p.y);
+    const s = shortenSegment(raw1.x, raw1.y, raw2.x, raw2.y, GAP_NODE, GAP_HUB);
+    const sDraw = shortenSegment(s.x1, s.y1, s.x2, s.y2, STROKE_STOP_BEFORE_TIP_PX, STROKE_STOP_BEFORE_TIP_PX);
+    spokes.push(
+      `<line x1="${sDraw.x1}" y1="${sDraw.y1}" x2="${sDraw.x2}" y2="${sDraw.y2}" stroke="rgba(148,163,184,0.28)" stroke-width="1.25" stroke-linecap="round" />`
+    );
+  }
+
+  const seenConn = new Set();
+  const lines = [];
+  for (const c of flow.connections) {
+    if (!nodeMap.has(c.from) || !nodeMap.has(c.to)) continue;
+    const k = `${c.from}->${c.to}`;
+    if (seenConn.has(k)) continue;
+    seenConn.add(k);
+    const pA = pos[c.from];
+    const pB = pos[c.to];
+    if (!pA || !pB) continue;
+    const active = connectionActive(c.from, c.to);
+    if (!active) continue;
+
+    const strokeW = 2.15;
+    const strokeIn = c.from === "GRID" ? FLOW_ARROW_GRID_IMPORT : FLOW_ARROW_SOLAR;
+    const markerIn = c.from === "GRID" ? arrowOrange : arrowGreen;
+
+    if (c.from !== "LOAD") {
+      const rawA1 = borderToward(pA.x, pA.y, hbW, hbH, hubCx, hubCy);
+      const rawA2 = borderToward(hubCx, hubCy, hwBox, hhBox, pA.x, pA.y);
+      const a = shortenSegment(rawA1.x, rawA1.y, rawA2.x, rawA2.y, GAP_NODE, GAP_HUB);
+      const aDash = retractStrokeEndBeforeArrowTip(a.x1, a.y1, a.x2, a.y2, STROKE_STOP_BEFORE_TIP_PX);
+      lines.push(
+        `<line x1="${aDash.x1}" y1="${aDash.y1}" x2="${aDash.x2}" y2="${aDash.y2}" class="se-flow-line se-flow-animate" stroke="${strokeIn}" stroke-width="${strokeW}" stroke-linecap="round" />`
+      );
+      lines.push(
+        `<line x1="${aDash.x2}" y1="${aDash.y2}" x2="${a.x2}" y2="${a.y2}" stroke="transparent" stroke-width="1" marker-end="url(#${markerIn})" pointer-events="none" />`
+      );
+    }
+
+    const rawB1 = borderToward(hubCx, hubCy, hwBox, hhBox, pB.x, pB.y);
+    const rawB2 = borderToward(pB.x, pB.y, hbW, hbH, hubCx, hubCy);
+    const b = shortenSegment(rawB1.x, rawB1.y, rawB2.x, rawB2.y, GAP_HUB, GAP_NODE);
+    const bDash = retractStrokeEndBeforeArrowTip(b.x1, b.y1, b.x2, b.y2, STROKE_STOP_BEFORE_TIP_PX);
+
+    let strokeOut;
+    let markerOut;
+    if (c.to === "GRID") {
+      strokeOut = FLOW_ARROW_GRID_IMPORT;
+      markerOut = arrowOrange;
+    } else if (c.to === "LOAD") {
+      if (c.from === "GRID") {
+        strokeOut = FLOW_ARROW_GRID_IMPORT;
+        markerOut = arrowOrange;
+      } else {
+        strokeOut = FLOW_ARROW_SOLAR;
+        markerOut = arrowGreen;
+      }
+    } else {
+      strokeOut = FLOW_ARROW_SOLAR;
+      markerOut = arrowGreen;
+    }
+
+    lines.push(
+      `<line x1="${bDash.x1}" y1="${bDash.y1}" x2="${bDash.x2}" y2="${bDash.y2}" class="se-flow-line se-flow-animate" stroke="${strokeOut}" stroke-width="${strokeW}" stroke-linecap="round" />`
+    );
+    lines.push(
+      `<line x1="${bDash.x2}" y1="${bDash.y2}" x2="${b.x2}" y2="${b.y2}" stroke="transparent" stroke-width="1" marker-end="url(#${markerOut})" pointer-events="none" />`
+    );
+  }
+
+  const nodeGroups = [];
+  for (const nodeKey of renderOrder) {
+    const n = nodeMap.get(nodeKey);
+    if (!n) continue;
+    const p = pos[n.key];
+    const x = p.x - hbW;
+    const y = p.y - hbH;
+    const pk = n.powerKw;
+    const pkAbs = Math.abs(pk);
+    const pkDigits = pkAbs >= 10 ? 1 : pkAbs >= 1 ? 2 : pkAbs >= 0.01 ? 2 : 3;
+    const kwStr = pk.toLocaleString("de-DE", {
+      minimumFractionDigits: pkAbs >= 10 ? 1 : 2,
+      maximumFractionDigits: pkDigits,
+    });
+    const storDe = storageStatusDe(n.status);
+    const socInIcon =
+      n.key === "STORAGE" && n.chargeLevelPct != null && Number.isFinite(n.chargeLevelPct);
+    const socPct = socInIcon ? Math.max(0, Math.min(100, n.chargeLevelPct)) : null;
+    const storageSubline =
+      n.key === "STORAGE"
+        ? socInIcon
+          ? storDe ?? "\u2007"
+          : [
+              n.chargeLevelPct != null ? `${Math.round(n.chargeLevelPct)}\u202f%` : null,
+              storDe,
+            ]
+              .filter(Boolean)
+              .join(" · ") || "\u2007"
+        : "\u2007";
+    const storageSublineVisible =
+      n.key === "STORAGE" && (socInIcon ? !!storDe : !!(n.chargeLevelPct != null || storDe));
+
+    const iconChar =
+      n.key === "PV"
+        ? Math.abs(n.powerKw) >= FLOW_ACTIVE_EPS_KW
+          ? "\u2600"
+          : "\u263D"
+        : n.key === "LOAD"
+          ? "\u{1F3E0}"
+          : n.key === "GRID"
+            ? "\u26A1"
+            : "\u{1F50B}";
+
+    const socText =
+      socPct != null
+        ? `<text x="32" y="22" text-anchor="middle" dominant-baseline="central" fill="#ecfdf5" stroke="rgba(0,0,0,0.42)" stroke-width="0.35" paint-order="stroke fill" font-size="${socPct >= 100 ? 4.35 : 5.1}" font-weight="700">${Math.round(socPct)}%</text>`
+        : "";
+
+    const iconLine =
+      n.key === "STORAGE" && socPct != null
+        ? ""
+        : `<text x="32" y="22" text-anchor="middle" class="se-node-icon">${iconChar}</text>`;
+
+    nodeGroups.push(`
+      <g transform="translate(${x},${y})">
+        <rect width="${boxW}" height="${boxH}" rx="11" class="se-node-rect" />
+        ${iconLine}
+        ${socText}
+        <text x="32" y="45" text-anchor="middle" fill="${FLOW_KW_COLOR}" font-size="12" font-weight="700">
+          ${escapeXml(kwStr)}<tspan fill="${FLOW_KW_UNIT_COLOR}" font-size="10.5" font-weight="600"> kW</tspan>
+        </text>
+        <text x="32" y="58.5" text-anchor="middle" fill="var(--secondary-text-color)" font-size="9" fill-opacity="${storageSublineVisible ? 1 : 0}">
+          ${n.key === "STORAGE" ? escapeXml(storageSubline) : "\u2007"}
+        </text>
+      </g>
+    `);
+  }
+
+  const hubChip = `
+    <g transform="translate(${hubCx - hwBox}, ${hubCy - hhBox})">
+      <rect width="${hubW}" height="${hubH}" rx="8" class="se-hub-rect" />
+      <text x="${hubW / 2}" y="${hubH / 2 + 4}" text-anchor="middle" font-size="16" class="se-node-icon">\u2699</text>
+    </g>
+  `;
+
+  return `
+    <defs>
+      <marker id="${arrowGreen}" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto" markerUnits="userSpaceOnUse">
+        <path d="M0,0 L6,3 L0,6 Z" fill="${FLOW_MARKER_SOLAR_FILL}" />
+      </marker>
+      <marker id="${arrowOrange}" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto" markerUnits="userSpaceOnUse">
+        <path d="M0,0 L6,3 L0,6 Z" fill="${FLOW_MARKER_GRID_IMPORT_FILL}" />
+      </marker>
+    </defs>
+    ${spokes.join("")}
+    ${lines.join("")}
+    ${nodeGroups.join("")}
+    ${hubChip}
+  `;
+}
 
 class SolarEdgePowerFlowCard extends HTMLElement {
   connectedCallback() {
@@ -149,6 +510,10 @@ class SolarEdgePowerFlowCard extends HTMLElement {
       batterySoc: Number.isFinite(batterySoc) ? batterySoc : NaN,
       lastFetch: new Date(),
     };
+    const normalized = normalizePowerFlowFromApi(flow);
+    this._directPowerFlow =
+      normalized ||
+      buildSyntheticPowerFlow(pvW, loadW, gridW, batteryW, batterySoc, Boolean(this._config?.show_battery));
     this._directApiError = "";
   }
 
@@ -195,17 +560,6 @@ class SolarEdgePowerFlowCard extends HTMLElement {
     return value;
   }
 
-  _formatPower(watts) {
-    const abs = Math.abs(watts);
-    if (abs >= 1000) return `${(watts / 1000).toFixed(2)} kW`;
-    return `${Math.round(watts)} W`;
-  }
-
-  _formatSoc(soc) {
-    if (!Number.isFinite(soc)) return "-";
-    return `${Math.round(soc)}%`;
-  }
-
   _formatKwFromW(watts) {
     if (!Number.isFinite(watts)) return "-";
     const kw = watts / 1000;
@@ -215,20 +569,6 @@ class SolarEdgePowerFlowCard extends HTMLElement {
       minimumFractionDigits: abs >= 10 ? 1 : 2,
       maximumFractionDigits: digits,
     });
-  }
-
-  _clamp01(n) {
-    return Math.max(0, Math.min(1, n));
-  }
-
-  _lineWidthFromPower(absW, maxKW) {
-    const maxW = Math.max(1000, maxKW * 1000);
-    const ratio = this._clamp01(absW / maxW);
-    return 2 + ratio * 8;
-  }
-
-  _flowClass(val) {
-    return val >= 0 ? "flow-positive" : "flow-negative";
   }
 
   _render() {
@@ -252,6 +592,9 @@ class SolarEdgePowerFlowCard extends HTMLElement {
       gridW = this._directData.gridW;
       battW = showBattery ? this._directData.batteryW : 0;
       socRaw = this._directData.batterySoc;
+    } else if (useDirectApi) {
+      pvW = loadW = gridW = battW = 0;
+      socRaw = NaN;
     } else {
       const pvRaw = this._stateValue(e.pv_power);
       const loadRaw = this._stateValue(e.house_power);
@@ -265,23 +608,31 @@ class SolarEdgePowerFlowCard extends HTMLElement {
       battW = showBattery ? this._toW(battRaw, this._entityUnit(e.battery_power)) : 0;
     }
 
-    const p2home = Math.max(0, Math.min(pvW, loadW));
-    const pvExtra = Math.max(0, pvW - p2home);
-    const battCharge = Math.max(0, -battW);
-    const gridImport = Math.max(0, gridW);
-    const gridExport = Math.max(0, -gridW);
+    let flowPayload;
+    if (useDirectApi) {
+      flowPayload =
+        this._directPowerFlow ||
+        buildSyntheticPowerFlow(pvW, loadW, gridW, battW, socRaw, showBattery);
+    } else {
+      flowPayload = buildSyntheticPowerFlow(pvW, loadW, gridW, battW, socRaw, showBattery);
+    }
+    flowPayload = filterPowerFlowForBattery(flowPayload, showBattery);
 
-    const netW = gridImport - gridExport;
     const nowKw = this._formatKwFromW(pvW);
-    const activeEps = 8;
-    const activePv = Math.abs(pvW) > activeEps;
-    const activeLoad = Math.abs(loadW) > activeEps;
-    const activeGrid = Math.abs(netW) > activeEps;
-    const activeBatt = showBattery && Math.abs(battW) > activeEps;
     const liveTime = new Date().toLocaleTimeString("de-DE");
+    if (!this._flowSvgUid) this._flowSvgUid = `se${Math.random().toString(36).slice(2, 10)}`;
+    const flowSvgInner = buildPowerFlowSvgMarkup(flowPayload, this._flowSvgUid);
 
     const styles = `
       :host { display:block; }
+      @keyframes se-flow-dash {
+        from { stroke-dashoffset: 0; }
+        to { stroke-dashoffset: -36; }
+      }
+      .se-flow-animate {
+        stroke-dasharray: 7 11;
+        animation: se-flow-dash 1.05s linear infinite;
+      }
       ha-card {
         padding: 14px;
         border-radius: 18px;
@@ -334,95 +685,42 @@ class SolarEdgePowerFlowCard extends HTMLElement {
         color: rgba(248, 113, 113, 0.92);
         font-weight: 600;
       }
-      .flow-wrap {
-        border: 1px solid rgba(148, 163, 184, 0.2);
-        border-radius: 14px;
-        background: rgba(2, 6, 23, 0.25);
-        padding: 8px;
+      .se-flow-diagram {
+        padding: 2px 4px 6px;
       }
       .flow-title {
-        font-size: 0.66rem;
-        text-transform: uppercase;
-        letter-spacing: 0.14em;
+        margin-bottom: 8px;
         text-align: center;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.2em;
         color: var(--secondary-text-color);
-        margin-bottom: 4px;
       }
-      svg {
+      .se-flow-svg {
+        display: block;
         width: 100%;
+        max-width: 352px;
+        margin: 0 auto;
         height: auto;
+        overflow: visible;
       }
-      .node-box {
-        fill: rgba(15, 23, 42, 0.58);
-        stroke: rgba(148, 163, 184, 0.33);
+      .se-node-rect {
+        fill: rgba(var(--rgb-primary-text-color), 0.07);
+        stroke: rgba(var(--rgb-primary-text-color), 0.38);
         stroke-width: 1;
       }
-      .node-icon {
+      .se-hub-rect {
+        fill: rgba(15, 23, 42, 0.55);
+        stroke: rgba(148, 163, 184, 0.35);
+        stroke-width: 1;
+      }
+      .se-node-icon {
         font-size: 13px;
         opacity: 0.95;
-      }
-      .node-kw {
-        fill: #f87171;
-        font-size: 12px;
-        font-weight: 700;
-      }
-      .node-sub {
-        fill: rgba(203, 213, 225, 0.85);
-        font-size: 8px;
-      }
-      .line-base {
-        stroke: rgba(148, 163, 184, 0.30);
-        stroke-width: 1.2;
-        stroke-linecap: round;
-      }
-      .line-active-green {
-        stroke: rgba(74, 222, 128, 0.95);
-        stroke-width: 2.2;
-        stroke-linecap: round;
-      }
-      .line-active-orange {
-        stroke: rgba(251, 146, 60, 0.95);
-        stroke-width: 2.2;
-        stroke-linecap: round;
-      }
-      .stats {
-        margin-top: 10px;
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 8px;
-      }
-      .chip {
-        border: 1px solid rgba(148, 163, 184, 0.26);
-        border-radius: 12px;
-        padding: 8px 10px;
-        background: rgba(2, 6, 23, 0.25);
-      }
-      .chip-label {
-        font-size: 0.65rem;
-        text-transform: uppercase;
-        letter-spacing: 0.06em;
-        color: var(--secondary-text-color);
-      }
-      .chip-value {
-        margin-top: 2px;
-        font-size: 0.95rem;
-        font-weight: 700;
-        color: var(--primary-text-color);
+        fill: var(--primary-text-color);
       }
     `;
-
-    const pPv = { x: 110, y: 30 };
-    const pLoad = { x: 34, y: 94 };
-    const pGrid = { x: 186, y: 94 };
-    const pBatt = { x: 110, y: 158 };
-    const pHub = { x: 110, y: 94 };
-
-    const drawLine = (from, to, active, orange = false) => {
-      const cls = active ? (orange ? "line-active-orange" : "line-active-green") : "line-base";
-      return `<line x1="${from.x}" y1="${from.y}" x2="${to.x}" y2="${to.y}" class="${cls}" />`;
-    };
-
-    const batterySub = showBattery && e.battery_soc ? `SoC ${this._formatSoc(socRaw)}` : " ";
 
     this.shadowRoot.innerHTML = `
       <style>${styles}</style>
@@ -435,71 +733,12 @@ class SolarEdgePowerFlowCard extends HTMLElement {
           <div class="hero-label">Leistung jetzt</div>
           <div class="hero-value">${nowKw}<span class="unit"> kW</span></div>
         </div>
-        <div class="flow-wrap">
+        <div class="se-flow-diagram">
           <div class="flow-title">Leistungsfluss</div>
-          <svg viewBox="0 0 220 190" role="img" aria-label="SolarEdge Leistungsfluss">
-            ${drawLine(pPv, pHub, activePv)}
-            ${drawLine(pHub, pLoad, activeLoad, netW > activeEps)}
-            ${drawLine(pHub, pGrid, activeGrid, netW > activeEps)}
-            ${showBattery ? drawLine(pHub, pBatt, activeBatt) : ""}
-
-            <rect x="84" y="80" width="52" height="28" rx="8" class="node-box"></rect>
-            <text x="110" y="98" text-anchor="middle" class="node-icon">⚙</text>
-
-            <g transform="translate(78,6)">
-              <rect width="64" height="52" rx="10" class="node-box"></rect>
-              <text x="32" y="16" text-anchor="middle" class="node-icon">☀</text>
-              <text x="32" y="34" text-anchor="middle" class="node-kw">${this._formatKwFromW(pvW)} kW</text>
-              <text x="32" y="46" text-anchor="middle" class="node-sub">PV</text>
-            </g>
-
-            <g transform="translate(2,68)">
-              <rect width="64" height="52" rx="10" class="node-box"></rect>
-              <text x="32" y="16" text-anchor="middle" class="node-icon">🏠</text>
-              <text x="32" y="34" text-anchor="middle" class="node-kw">${this._formatKwFromW(loadW)} kW</text>
-              <text x="32" y="46" text-anchor="middle" class="node-sub">Haus</text>
-            </g>
-
-            <g transform="translate(154,68)">
-              <rect width="64" height="52" rx="10" class="node-box"></rect>
-              <text x="32" y="16" text-anchor="middle" class="node-icon">⚡</text>
-              <text x="32" y="34" text-anchor="middle" class="node-kw">${this._formatKwFromW(netW)} kW</text>
-              <text x="32" y="46" text-anchor="middle" class="node-sub">Netz</text>
-            </g>
-
-            ${showBattery ? `
-            <g transform="translate(78,132)">
-              <rect width="64" height="52" rx="10" class="node-box"></rect>
-              <text x="32" y="16" text-anchor="middle" class="node-icon">🔋</text>
-              <text x="32" y="34" text-anchor="middle" class="node-kw">${this._formatKwFromW(battW)} kW</text>
-              <text x="32" y="46" text-anchor="middle" class="node-sub">${batterySub}</text>
-            </g>
-            ` : ""}
+          <svg class="se-flow-svg" viewBox="0 -36 304 272" role="img" aria-label="SolarEdge Leistungsfluss">
+            ${flowSvgInner}
           </svg>
         </div>
-        <div class="stats">
-          <div class="chip">
-            <div class="chip-label">PV Ueberschuss</div>
-            <div class="chip-value">${this._formatPower(Math.max(0, pvExtra - battCharge + gridExport))}</div>
-          </div>
-          <div class="chip">
-            <div class="chip-label">Netzrichtung</div>
-            <div class="chip-value">${netW >= 0 ? "Bezug" : "Einspeisung"}</div>
-          </div>
-        </div>
-        ${useDirectApi ? `
-        <div class="stats">
-          <div class="chip">
-            <div class="chip-label">Datenquelle</div>
-            <div class="chip-value">SolarEdge API direkt</div>
-          </div>
-          <div class="chip">
-            <div class="chip-label">Letzter API Abruf</div>
-            <div class="chip-value">${this._directData?.lastFetch ? this._directData.lastFetch.toLocaleTimeString("de-DE") : "-"}</div>
-          </div>
-        </div>
-        ${this._directApiError ? `<div class="chip" style="margin-top:8px;"><div class="chip-label">API Fehler</div><div class="chip-value">${this._directApiError}</div></div>` : ""}
-        ` : ""}
       </ha-card>
     `;
   }
